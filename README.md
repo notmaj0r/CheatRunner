@@ -24,8 +24,6 @@ Ko-fi:
 
 [![Support me on Ko-fi](https://www.ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/maj0r)
 
-Join us on our Discord Server:
-
 [Join our Discord Server](https://discord.gg/E4g6fEqp46)
 
 ---
