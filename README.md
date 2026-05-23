@@ -1,13 +1,18 @@
 # CheatRunner 🎮
 
-**CheatRunner** is a PS5 web cheat trainer for **already-jailbroken PS5 consoles**.
+**CheatRunner** is a PS5 web launcher and cheat trainer for **already-jailbroken PS5 consoles**.
 
-It gives you a web dashboard to:
+It provides a local web dashboard to:
 
-- launch installed games and apps;
+- list installed games and apps;
+- launch installed titles from a browser;
 - load local cheat files from the PS5 filesystem;
 - use `.mc4`, `.shn`, and `.json` trainers;
-- enable/disable cheats from your browser.
+- optionally download cheat files from configured cheat sources;
+- enable/disable supported cheats from your browser;
+- inspect logs, diagnostics, and cheat debug information.
+
+CheatRunner is focused on local/offline homebrew usage on an already-jailbroken PS5.
 
 ---
 
@@ -21,9 +26,7 @@ Ko-fi:
 
 Join us on our Discord Server:
 
-```text
-https://discord.gg/E4g6fEqp46
-```
+[Join our Discord Server](https://discord.gg/E4g6fEqp46)
 
 ---
 
@@ -31,7 +34,7 @@ https://discord.gg/E4g6fEqp46
 
 CheatRunner is **not a jailbreak**, **not an exploit**, and **not a tool for stock/retail consoles**.
 
-It only works when your PS5 is already jailbroken and already has the needed environment running.
+It only works when your PS5 is already jailbroken and already has the required homebrew/payload environment running.
 
 CheatRunner does **not** provide:
 
@@ -43,9 +46,11 @@ CheatRunner does **not** provide:
 
 It is a local homebrew tool for testing trainers on your own already-jailbroken console.
 
-Use it at your own risk. 
-By using cheats, it can crash the game, break a session, corrupt your savegame, softlock or behave differently depending on game versions.
-**Always backup your save files before using any cheats!**
+Use it at your own risk.
+
+Runtime cheat memory writes can crash the game, break a session, corrupt your savegame, softlock the title, or behave differently depending on the game version/update.
+
+**Always back up your save files before using any cheats.**
 
 ---
 
@@ -54,15 +59,17 @@ By using cheats, it can crash the game, break a session, corrupt your savegame, 
 - PS5 web dashboard.
 - Installed games/apps list.
 - PS5 / PS4 / Apps filters.
-- Launch games from the browser.
+- App title names from `app.db` when SQLite support is enabled.
+- Launch installed games/apps from the browser.
 - Local cheat loading from `/data/cheatrunner/cheats`.
-- `.mc4`, `.shn`, and `.json` support.
-- ON/OFF trainer toggles.
+- `.mc4`, `.shn`, and `.json` cheat/trainer support.
+- Optional remote cheat downloads from configured cheat sources.
+- ON/OFF trainer toggles where supported.
 - Runtime restore where possible.
 - Crash-suspect detection.
 - Logs panel.
 - Copy Logs / Copy Cheat Debug / Copy Diagnostic Bundle.
-- Restart / Disable Payload button for faster testing.
+- Shutdown Payload button for testing and cleanup.
 
 ---
 
@@ -70,7 +77,7 @@ By using cheats, it can crash the game, break a session, corrupt your savegame, 
 
 Send `CheatRunner.elf` to your already-jailbroken PS5 using your preferred payload loader.
 
-Then open the dashboard on your browser:
+Then open the dashboard in your browser:
 
 ```text
 http://<PS5-IP>:9999
@@ -90,7 +97,7 @@ CheatRunner is still experimental.
 
 Some cheats may:
 
-- work fine;
+- work correctly;
 - fail to apply;
 - mismatch the game version;
 - crash the game;
@@ -101,10 +108,12 @@ When reporting bugs, include:
 
 - CheatRunner logs;
 - Copy Cheat Debug output;
+- Copy Diagnostic Bundle output if available;
 - game title ID;
-- game version;
+- game version/update;
 - cheat file used;
-- what cheat was enabled/disabled before the issue happened.
+- which cheat was enabled/disabled;
+- what happened before the issue.
 
 ---
 
@@ -139,11 +148,27 @@ CheatRunner will try to match cheats by title ID and version when possible.
 
 ---
 
+## 🌐 Remote Cheat Sources
+
+CheatRunner can optionally download cheat files from configured cheat repositories.
+
+Remote downloads are user-triggered and are intended only as a convenience layer over the local cheat workflow.
+
+The main local cheat path remains:
+
+```text
+/data/cheatrunner/cheats
+```
+
+Remote XML game patches are **not included in v0.1**.
+
+---
+
 ## 🛠️ Building
 
 CheatRunner is built with `ps5-payload-sdk`.
 
-Example layout:
+Recommended project layout:
 
 ```text
 CheatRunner/
@@ -151,27 +176,48 @@ CheatRunner/
 │   ├── src/
 │   ├── CMakeLists.txt
 │   └── build-cheatrunner.ps1
-└── ps5-payload-sdk/
+└── PS5-Payload-dev/
+    └── sdk-master/
+```
+
+The build script searches for the SDK in this order:
+
+```text
+1. PS5_PAYLOAD_SDK environment variable
+2. ../PS5-Payload-dev/sdk-master
+3. ../ps5-payload-sdk
 ```
 
 Build on Windows:
 
 ```powershell
 cd CheatRunnerPayload
-.\build-cheatrunner.ps1
+.\build-cheatrunner.ps1 -Clean -Sqlite
 ```
 
 SQLite note:
 
-- If `src/third_party/sqlite3.c` and `src/third_party/sqlite3.h` exist, bundled SQLite is enabled automatically.
-- Use `-NoSqlite` to disable it explicitly.
-- Use `-Sqlite` to force-enable and fail fast if amalgamation files are missing.
+- If `src/third_party/sqlite3.c` and `src/third_party/sqlite3.h` exist, bundled SQLite can be enabled.
+- Use `-Sqlite` to force-enable SQLite support.
+- Use `-NoSqlite` to disable SQLite explicitly.
 
 Output:
 
 ```text
 build/CheatRunner.elf
 ```
+
+---
+
+## 🧭 Roadmap
+
+The following features were removed from the v0.1 stabilization pass and may return in a future release:
+
+- XML game patches;
+- PS-Game-Patch integration;
+- controller hotkeys / ScePad monitor.
+
+They were removed to keep the first stable CheatRunner release focused on games, launching, local/remote cheats, and trainer stability.
 
 ---
 
@@ -183,10 +229,10 @@ Special thanks to:
 
 - **ELF Arsenal & VoidShell** for project ideas and implementations;
 - **ps5-payload-sdk** developers and contributors;
-- **TeeKay87** for his HEN-Cheats-Collection project;
-- **etaHEN** for his PS5_Cheats project;
-- **GoldHEN** for his GoldHEN_Cheat_Repository project;
-- everyone testing, reporting logs, and helping the project.
+- **TeeKay87** for the HEN-Cheats-Collection project;
+- **etaHEN** for the PS5_Cheats project;
+- **GoldHEN** for the GoldHEN_Cheat_Repository project;
+- everyone testing, reporting logs, and helping improve the project.
 
 ---
 
