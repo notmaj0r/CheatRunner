@@ -146,6 +146,24 @@ status_text_for(int status) {
   }
 }
 
+static int
+socket_send_all(int fd, const void *buf, size_t len) {
+  const uint8_t *p = (const uint8_t *)buf;
+  size_t sent = 0;
+  while (sent < len) {
+    ssize_t n = send(fd, p + sent, len - sent, 0);
+    if (n > 0) {
+      sent += (size_t)n;
+      continue;
+    }
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    return -1;
+  }
+  return 0;
+}
+
 void
 http_send_response(int fd, int status, const char *content_type, const uint8_t *body, size_t body_len) {
   char header[512];
@@ -160,9 +178,11 @@ http_send_response(int fd, int status, const char *content_type, const uint8_t *
                    status, status_text_for(status), content_type ? content_type : "application/octet-stream",
                    (unsigned int)body_len);
   if (n > 0) {
-    send(fd, header, (size_t)n, 0);
+    if (socket_send_all(fd, header, (size_t)n) != 0) {
+      return;
+    }
     if (body_len > 0) {
-      send(fd, body, body_len, 0);
+      (void)socket_send_all(fd, body, body_len);
     }
   }
 }
@@ -3732,8 +3752,10 @@ http_send_png_asset(int fd) {
     "\r\n",
     (unsigned int)len);
   if (n > 0) {
-    send(fd, header, (size_t)n, 0);
-    send(fd, g_cheatrunner_png, len, 0);
+    if (socket_send_all(fd, header, (size_t)n) != 0) {
+      return;
+    }
+    (void)socket_send_all(fd, g_cheatrunner_png, len);
   }
 }
 

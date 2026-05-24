@@ -36,6 +36,24 @@ long long cr_http_too_many_requests_count(void) { return g_too_many_requests_cou
 typedef struct { int fd; char ip[64]; } http_client_ctx_t;
 static void http_handle_client(int fd, const char *client_ip);
 
+static int
+socket_send_all(int fd, const void *buf, size_t len) {
+  const uint8_t *p = (const uint8_t *)buf;
+  size_t sent = 0;
+  while (sent < len) {
+    ssize_t n = send(fd, p + sent, len - sent, 0);
+    if (n > 0) {
+      sent += (size_t)n;
+      continue;
+    }
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    return -1;
+  }
+  return 0;
+}
+
 static void *
 http_client_thread(void *arg) {
   http_client_ctx_t *ctx = (http_client_ctx_t *)arg;
@@ -122,8 +140,8 @@ http_send_json(int fd, int status, const char *body) {
                    "\r\n",
                    status, (unsigned int)strlen(payload));
   if (n > 0) {
-    send(fd, header, (size_t)n, 0);
-    send(fd, payload, strlen(payload), 0);
+    (void)socket_send_all(fd, header, (size_t)n);
+    (void)socket_send_all(fd, payload, strlen(payload));
   }
 }
 
@@ -139,9 +157,10 @@ http_handle_client(int fd, const char *client_ip) {
   size_t body_len = 0;
 
   struct timeval tv;
-  tv.tv_sec = 3;
+  tv.tv_sec = 10;
   tv.tv_usec = 0;
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
   for (;;) {
     if (off >= MAX_REQ_SIZE) {
@@ -149,6 +168,9 @@ http_handle_client(int fd, const char *client_ip) {
     }
     int n = recv(fd, req + off, MAX_REQ_SIZE - off, 0);
     if (n <= 0) {
+      if (n < 0 && errno == EINTR) {
+        continue;
+      }
       if (off == 0) {
         free(req);
         return;
@@ -196,6 +218,9 @@ http_handle_client(int fd, const char *client_ip) {
     }
     int n = recv(fd, req + off, MAX_REQ_SIZE - off, 0);
     if (n <= 0) {
+      if (n < 0 && errno == EINTR) {
+        continue;
+      }
       break;
     }
     off += (size_t)n;
@@ -320,7 +345,12 @@ http_server_thread(void *arg) {
         if (g_shutdown_requested) {
           break;
         }
-        break;
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+          continue;
+        }
+        log_msg("[HTTP] accept() failed: %d", errno);
+        sleep(1);
+        continue;
       }
       char client_ip[64] = {0};
       inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));

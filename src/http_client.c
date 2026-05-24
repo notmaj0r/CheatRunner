@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "http_client.h"
 
@@ -43,6 +44,14 @@ int sceHttpDeleteRequest(int req_id);
 static int
 http_ssl_cb(void) {
   return 0;
+}
+
+static int
+http_should_retry(int rc, int status_code) {
+  if (rc != 0) {
+    return 1;
+  }
+  return status_code == 429 || status_code == 500 || status_code == 502 || status_code == 503 || status_code == 504;
 }
 
 static int
@@ -141,6 +150,13 @@ http_request(http_ctx_t *ctx, uint8_t **data, size_t *len, int *status_out, size
   for (;;) {
     if ((cap - off) < 4096) {
       size_t new_cap = cap * 2;
+      if (max_bytes > 0 && new_cap > max_bytes) {
+        new_cap = max_bytes;
+      }
+      if (new_cap <= cap) {
+        free(buf);
+        return -2;
+      }
       uint8_t *nbuf = realloc(buf, new_cap);
       if (!nbuf) {
         free(buf);
@@ -221,6 +237,9 @@ http_get_url_ex_timeout(const char *agent, const char *url, size_t max_bytes, in
   size_t body_len = 0;
   int status = -1;
   int rc = 0;
+  int init_rc = 0;
+  int attempts = 3;
+  int effective_timeout_ms = timeout_ms > 0 ? timeout_ms : 15000;
 
   if (!url || !data_out || !len_out) {
     return -1;
@@ -235,16 +254,30 @@ http_get_url_ex_timeout(const char *agent, const char *url, size_t max_bytes, in
     agent = "CheatRunner/0.1";
   }
 
-  if (http_init(&ctx, agent, url, timeout_ms) < 0) {
+  for (int attempt = 0; attempt < attempts; attempt++) {
+    body = NULL;
+    body_len = 0;
+    status = -1;
+    rc = -1;
+
+    init_rc = http_init(&ctx, agent, url, effective_timeout_ms);
+    if (init_rc >= 0) {
+      rc = http_request(&ctx, &body, &body_len, &status, max_bytes);
+    }
     http_fini(&ctx);
-    return -1;
+
+    if (!http_should_retry(rc, status) || attempt == attempts - 1) {
+      break;
+    }
+    free(body);
+    body = NULL;
+    body_len = 0;
+    usleep((useconds_t)((attempt + 1) * 250000));
   }
 
-  rc = http_request(&ctx, &body, &body_len, &status, max_bytes);
   if (status_out) {
     *status_out = status;
   }
-  http_fini(&ctx);
   if (rc != 0) {
     free(body);
     return rc;
