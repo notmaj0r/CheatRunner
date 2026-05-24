@@ -13,8 +13,9 @@ function Fail($Message) {
   exit 1
 }
 
-$projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $payloadRoot = Resolve-Path $PSScriptRoot
+$projectRoot = $payloadRoot
+$parentRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $buildDir    = Join-Path $payloadRoot "build"
 $cacheFile   = Join-Path $buildDir "CMakeCache.txt"
 $jsCheckScript = Join-Path $projectRoot "tools\check_dashboard_js.py"
@@ -24,8 +25,12 @@ $sdkCandidates = @()
 if ($env:PS5_PAYLOAD_SDK) {
   $sdkCandidates += $env:PS5_PAYLOAD_SDK
 }
+$sdkCandidates += (Join-Path $payloadRoot "PS5-Payload-dev\sdk-master")
+$sdkCandidates += (Join-Path $payloadRoot "ps5-payload-sdk")
 $sdkCandidates += (Join-Path $projectRoot "PS5-Payload-dev\sdk-master")
 $sdkCandidates += (Join-Path $projectRoot "ps5-payload-sdk")
+$sdkCandidates += (Join-Path $parentRoot "PS5-Payload-dev\sdk-master")
+$sdkCandidates += (Join-Path $parentRoot "ps5-payload-sdk")
 
 $sdkRoot = $null
 foreach ($candidate in $sdkCandidates) {
@@ -41,8 +46,12 @@ if (-not $sdkRoot) {
 PS5 payload SDK not found.
 Expected one of:
   - environment variable PS5_PAYLOAD_SDK
+  - $payloadRoot\PS5-Payload-dev\sdk-master
+  - $payloadRoot\ps5-payload-sdk
   - $projectRoot\PS5-Payload-dev\sdk-master
   - $projectRoot\ps5-payload-sdk
+  - $parentRoot\PS5-Payload-dev\sdk-master
+  - $parentRoot\ps5-payload-sdk
 "@
   exit 1
 }
