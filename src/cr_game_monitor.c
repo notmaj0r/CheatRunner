@@ -175,8 +175,31 @@ read_running_state(running_game_state_t *out) {
   if (!st.title_name[0]) {
     snprintf(st.title_name, sizeof(st.title_name), "%s", title);
   }
-  read_param_value_by_title_id(title, "contentVersion", st.content_version, sizeof(st.content_version));
-  read_param_value_by_title_id(title, "appVersion", st.app_version, sizeof(st.app_version));
+  /* Try /proc/{pid}/root/app0 first: accesses the running game's sandbox filesystem
+   * namespace on PS5/FreeBSD. Falls back to direct /app0, then static installed paths.
+   * For PS4 BC games also try the proc-namespace patch path (update SFO may differ from base). */
+  char proc_sfo[64];
+  char proc_patch_sfo[128];
+  snprintf(proc_sfo, sizeof(proc_sfo), "/proc/%d/root/app0/sce_sys/param.sfo", (int)pid);
+  snprintf(proc_patch_sfo, sizeof(proc_patch_sfo),
+           "/proc/%d/root/user/patch/%s/sce_sys/param.sfo", (int)pid, title);
+  read_param_value_from_sfo(proc_sfo, "contentVersion", st.content_version, sizeof(st.content_version));
+  if (!st.content_version[0])
+    read_param_value_from_sfo(proc_patch_sfo, "contentVersion", st.content_version, sizeof(st.content_version));
+  if (!st.content_version[0])
+    read_param_value_from_sfo("/app0/sce_sys/param.sfo", "contentVersion", st.content_version, sizeof(st.content_version));
+  if (!st.content_version[0])
+    read_param_value_by_title_id(title, "contentVersion", st.content_version, sizeof(st.content_version));
+  read_param_value_from_sfo(proc_sfo, "appVersion", st.app_version, sizeof(st.app_version));
+  if (!st.app_version[0])
+    read_param_value_from_sfo(proc_patch_sfo, "appVersion", st.app_version, sizeof(st.app_version));
+  if (!st.app_version[0])
+    read_param_value_from_sfo("/app0/sce_sys/param.sfo", "appVersion", st.app_version, sizeof(st.app_version));
+  if (!st.app_version[0])
+    read_param_value_by_title_id(title, "appVersion", st.app_version, sizeof(st.app_version));
+  if (!st.content_version[0] && !st.app_version[0])
+    cr_log("warn", "game.ver", "version undetected title=%s pid=%d — tried proc=%s and static paths",
+           title, (int)pid, proc_sfo);
   snprintf(st.eboot_path, sizeof(st.eboot_path), "/app0/eboot.bin");
   if (out) {
     *out = st;
@@ -234,26 +257,26 @@ rpc_refresh_title_and_notify(void) {
         }
         pthread_mutex_unlock(&g_cfg_lock);
         pthread_mutex_lock(&g_crash_guard_lock);
-        if (g_crash_guard.title_id[0] &&
-            strcmp(g_crash_guard.title_id, prev.title_id) == 0 &&
-            g_crash_guard.pid == prev.pid &&
-            g_crash_guard.enabled_at_ms > 0) {
-          uint64_t elapsed = now_ms() - g_crash_guard.enabled_at_ms;
+        for (int _gi = g_crash_guard_n - 1; _gi >= 0; _gi--) {
+          crash_guard_state_t *cg = &g_crash_guard_arr[_gi];
+          if (!cg->title_id[0] || cg->enabled_at_ms == 0) continue;
+          if (strcmp(cg->title_id, prev.title_id) != 0 || cg->pid != prev.pid) continue;
+          uint64_t elapsed = now_ms() - cg->enabled_at_ms;
           if (elapsed < (uint64_t)watch_ms && g_crash_suspects_n < CRASH_SUSPECT_MAX) {
             crash_suspect_rec_t *rec = &g_crash_suspects[g_crash_suspects_n++];
-            snprintf(rec->title_id, sizeof(rec->title_id), "%s", g_crash_guard.title_id);
-            rec->mod_index = g_crash_guard.mod_index;
-            snprintf(rec->mod_name, sizeof(rec->mod_name), "%s", g_crash_guard.mod_name);
-            rec->pid = g_crash_guard.pid;
+            snprintf(rec->title_id, sizeof(rec->title_id), "%s", cg->title_id);
+            rec->mod_index  = cg->mod_index;
+            snprintf(rec->mod_name, sizeof(rec->mod_name), "%s", cg->mod_name);
+            rec->pid        = cg->pid;
             rec->elapsed_ms = elapsed;
-            rec->ts = time(NULL);
-            rec->app_id = prev.app_id;
-            just_suspected = 1;
+            rec->ts         = time(NULL);
+            rec->app_id     = prev.app_id;
+            just_suspected  = 1;
             cr_log("warn", "cheats.guard",
                    "game stopped %llums after enabling mod=%d name=\"%s\"; marking crash_suspect",
-                   (unsigned long long)elapsed, g_crash_guard.mod_index, g_crash_guard.mod_name);
+                   (unsigned long long)elapsed, cg->mod_index, cg->mod_name);
           }
-          memset(&g_crash_guard, 0, sizeof(g_crash_guard));
+          g_crash_guard_arr[_gi] = g_crash_guard_arr[--g_crash_guard_n];
         }
         pthread_mutex_unlock(&g_crash_guard_lock);
 
@@ -264,6 +287,7 @@ rpc_refresh_title_and_notify(void) {
           }
         }
         pthread_mutex_unlock(&g_mods_disabled_lock);
+        mod_enabled_clear_for_pid(prev.pid);
 
         {
           uint64_t now_t = now_ms();
@@ -297,6 +321,36 @@ rpc_refresh_title_and_notify(void) {
       notification_add("game_started", "Game started: %s", cur.title_id);
       cr_log("info", "game", "game started %s", cur.title_id);
     }
+  }
+
+  /* Auto-clear crash suspects whose watch window passed without a game crash.
+   * Runs every poll tick while the game is running. If a mod stayed enabled for
+   * longer than cheat_post_apply_watch_ms with no crash, it is no longer a suspect. */
+  if (cur.running) {
+    int wcms = 8000;
+    pthread_mutex_lock(&g_cfg_lock);
+    if (g_cfg.cheat_post_apply_watch_ms > 0) wcms = g_cfg.cheat_post_apply_watch_ms;
+    pthread_mutex_unlock(&g_cfg_lock);
+    uint64_t now_t = now_ms();
+    pthread_mutex_lock(&g_crash_guard_lock);
+    for (int _gi = g_crash_guard_n - 1; _gi >= 0; _gi--) {
+      crash_guard_state_t *cg = &g_crash_guard_arr[_gi];
+      if (cg->enabled_at_ms == 0) continue;
+      if (strcmp(cg->title_id, cur.title_id) != 0 || cg->pid != cur.pid) continue;
+      if (now_t - cg->enabled_at_ms < (uint64_t)wcms) continue;
+      /* Window expired with no crash: remove matching suspects */
+      for (int _si = g_crash_suspects_n - 1; _si >= 0; _si--) {
+        if (strcmp(g_crash_suspects[_si].title_id, cg->title_id) == 0 &&
+            g_crash_suspects[_si].mod_index == cg->mod_index) {
+          g_crash_suspects[_si] = g_crash_suspects[--g_crash_suspects_n];
+          cr_log("info", "cheats.guard",
+                 "crash_suspect cleared: mod=%d name=\"%s\" survived %dms watch window",
+                 cg->mod_index, cg->mod_name, wcms);
+        }
+      }
+      g_crash_guard_arr[_gi] = g_crash_guard_arr[--g_crash_guard_n];
+    }
+    pthread_mutex_unlock(&g_crash_guard_lock);
   }
 
   pthread_mutex_lock(&g_activity_lock);

@@ -17,7 +17,8 @@ cheatrunner_config_t g_cfg = {
     .launch_wait_timeout_ms = 30000,
     .cheat_engine = 1,
     .cheat_validate_original_bytes = 1,
-    .cheat_restore_rx = 1,
+    .cheat_restore_rx = 0,
+    .cheat_restore_original_prot = 1,
     .cheat_index_cache_ttl_sec = 86400,
     .allow_force_enable = 0,
     .cheat_state_after_launch_delay_ms = 8000,
@@ -29,15 +30,23 @@ cheatrunner_config_t g_cfg = {
     .launch_user_id = "auto",
     .cheat_mc4_address_mode = "auto",
     .cheat_shn_address_mode = "auto",
-    .allow_unsafe_mc4_apply = 1,
+    .allow_unsafe_mc4_apply = 0,
+    .allow_unsafe_shn_apply = 0,
+    .allow_legacy_mc4_without_expected = 1,
+    .allow_legacy_shn_without_expected = 1,
+    /* Default to relative: PS5 MC4/SHN addresses without explicit expected bytes should use
+     * base + offset.  The old "legacy" magnitude heuristic (off >= 0x200000 → absolute) was
+     * wrong for most PS5 MC4 files and is preserved only as an explicit opt-in option. */
+    .cheat_mc4_unverified_fallback = "relative",
+    .cheat_shn_unverified_fallback = "relative",
     .cheat_log_candidates = 0,
     .launch_quick_verify_ms = 5000,
     .cheat_post_apply_watch_ms = 8000,
     .cheat_mark_crash_suspect = 1,
     .cheat_apply_one_at_a_time = 1,
-    .cheat_apply_cooldown_ms = 0,
+    .cheat_apply_cooldown_ms = 500,
     .cheat_post_apply_poll_ms = 500,
-    .cheat_min_stable_ms = 0,
+    .cheat_min_stable_ms = 8000,
     .cheat_sources_enabled = 1,
     .cheat_remote_download_enabled = 1,
     .cheat_source_cache_ttl_seconds = 21600,
@@ -66,7 +75,8 @@ config_set_defaults(cheatrunner_config_t *cfg) {
       .launch_wait_timeout_ms = 30000,
       .cheat_engine = 1,
       .cheat_validate_original_bytes = 1,
-      .cheat_restore_rx = 1,
+      .cheat_restore_rx = 0,
+      .cheat_restore_original_prot = 1,
       .cheat_index_cache_ttl_sec = 86400,
       .allow_force_enable = 0,
       .cheat_state_after_launch_delay_ms = 8000,
@@ -78,15 +88,20 @@ config_set_defaults(cheatrunner_config_t *cfg) {
       .launch_user_id = "auto",
       .cheat_mc4_address_mode = "auto",
       .cheat_shn_address_mode = "auto",
-      .allow_unsafe_mc4_apply = 1,
+      .allow_unsafe_mc4_apply = 0,
+      .allow_unsafe_shn_apply = 0,
+      .allow_legacy_mc4_without_expected = 1,
+      .allow_legacy_shn_without_expected = 1,
+      .cheat_mc4_unverified_fallback = "relative",
+      .cheat_shn_unverified_fallback = "relative",
       .cheat_log_candidates = 0,
       .launch_quick_verify_ms = 5000,
       .cheat_post_apply_watch_ms = 8000,
       .cheat_mark_crash_suspect = 1,
       .cheat_apply_one_at_a_time = 1,
-      .cheat_apply_cooldown_ms = 0,
+      .cheat_apply_cooldown_ms = 500,
       .cheat_post_apply_poll_ms = 500,
-      .cheat_min_stable_ms = 0,
+      .cheat_min_stable_ms = 8000,
       .cheat_sources_enabled = 1,
       .cheat_remote_download_enabled = 1,
       .cheat_source_cache_ttl_seconds = 21600,
@@ -117,6 +132,7 @@ config_save_locked(void) {
       "cheat_engine=%d\n"
       "cheat_validate_original_bytes=%d\n"
       "cheat_restore_rx=%d\n"
+      "cheat_restore_original_prot=%d\n"
       "cheat_index_cache_ttl_sec=%d\n"
       "allow_force_enable=%d\n"
       "cheat_state_after_launch_delay_ms=%d\n"
@@ -125,6 +141,11 @@ config_save_locked(void) {
       "cheat_mc4_address_mode=%s\n"
       "cheat_shn_address_mode=%s\n"
       "allow_unsafe_mc4_apply=%d\n"
+      "allow_unsafe_shn_apply=%d\n"
+      "allow_legacy_mc4_without_expected=%d\n"
+      "allow_legacy_shn_without_expected=%d\n"
+      "cheat_mc4_unverified_fallback=%s\n"
+      "cheat_shn_unverified_fallback=%s\n"
       "cheat_log_candidates=%d\n"
       "launch_user_id=%s\n"
       "dev_reload_enabled=%d\n"
@@ -152,9 +173,13 @@ config_save_locked(void) {
       g_cfg.auto_download_missing_cheat, g_cfg.launch_kill_current,
       g_cfg.launch_kill_delay_ms, g_cfg.launch_wait_timeout_ms, g_cfg.launch_quick_verify_ms,
       g_cfg.cheat_engine, g_cfg.cheat_validate_original_bytes,
-      g_cfg.cheat_restore_rx, g_cfg.cheat_index_cache_ttl_sec, g_cfg.allow_force_enable,
+      g_cfg.cheat_restore_rx, g_cfg.cheat_restore_original_prot,
+      g_cfg.cheat_index_cache_ttl_sec, g_cfg.allow_force_enable,
       g_cfg.cheat_state_after_launch_delay_ms, g_cfg.launch_post_timeout_grace_ms, g_cfg.cheat_address_auto_detect,
-      g_cfg.cheat_mc4_address_mode, g_cfg.cheat_shn_address_mode, g_cfg.allow_unsafe_mc4_apply,
+      g_cfg.cheat_mc4_address_mode, g_cfg.cheat_shn_address_mode,
+      g_cfg.allow_unsafe_mc4_apply, g_cfg.allow_unsafe_shn_apply,
+      g_cfg.allow_legacy_mc4_without_expected, g_cfg.allow_legacy_shn_without_expected,
+      g_cfg.cheat_mc4_unverified_fallback, g_cfg.cheat_shn_unverified_fallback,
       g_cfg.cheat_log_candidates, g_cfg.launch_user_id,
       g_cfg.dev_reload_enabled, g_cfg.dev_shutdown_delay_ms,
       g_cfg.cheat_post_apply_watch_ms, g_cfg.cheat_mark_crash_suspect,
@@ -186,6 +211,7 @@ config_load(void) {
     return 0;
   }
   char line[256];
+  int valid_lines = 0;
   while (fgets(line, sizeof(line), fp) != NULL) {
     char *eq = strchr(line, '=');
     if (!eq) {
@@ -196,6 +222,7 @@ config_load(void) {
     char *v = eq + 1;
     str_trim(k);
     str_trim(v);
+    valid_lines++;
     if (!strcmp(k, "http_port")) {
       g_cfg.http_port = atoi(v);
     } else if (!strcmp(k, "rpc_port") || !strcmp(k, "rpc_legacy_enabled") ||
@@ -218,7 +245,9 @@ config_load(void) {
     } else if (!strcmp(k, "cheat_validate_original_bytes")) {
       g_cfg.cheat_validate_original_bytes = atoi(v) ? 1 : 0;
     } else if (!strcmp(k, "cheat_restore_rx")) {
-      g_cfg.cheat_restore_rx = atoi(v) ? 1 : 0;
+      g_cfg.cheat_restore_rx = atoi(v) ? 1 : 0;  /* legacy: kept for compat; default is now 0 */
+    } else if (!strcmp(k, "cheat_restore_original_prot")) {
+      g_cfg.cheat_restore_original_prot = atoi(v) ? 1 : 0;
     } else if (!strcmp(k, "cheat_index_cache_ttl_sec")) {
       g_cfg.cheat_index_cache_ttl_sec = atoi(v);
     } else if (!strcmp(k, "allow_force_enable")) {
@@ -235,6 +264,16 @@ config_load(void) {
       snprintf(g_cfg.cheat_shn_address_mode, sizeof(g_cfg.cheat_shn_address_mode), "%s", v);
     } else if (!strcmp(k, "allow_unsafe_mc4_apply")) {
       g_cfg.allow_unsafe_mc4_apply = atoi(v) ? 1 : 0;
+    } else if (!strcmp(k, "allow_unsafe_shn_apply")) {
+      g_cfg.allow_unsafe_shn_apply = atoi(v) ? 1 : 0;
+    } else if (!strcmp(k, "allow_legacy_mc4_without_expected")) {
+      g_cfg.allow_legacy_mc4_without_expected = atoi(v) ? 1 : 0;
+    } else if (!strcmp(k, "allow_legacy_shn_without_expected")) {
+      g_cfg.allow_legacy_shn_without_expected = atoi(v) ? 1 : 0;
+    } else if (!strcmp(k, "cheat_mc4_unverified_fallback")) {
+      snprintf(g_cfg.cheat_mc4_unverified_fallback, sizeof(g_cfg.cheat_mc4_unverified_fallback), "%s", v);
+    } else if (!strcmp(k, "cheat_shn_unverified_fallback")) {
+      snprintf(g_cfg.cheat_shn_unverified_fallback, sizeof(g_cfg.cheat_shn_unverified_fallback), "%s", v);
     } else if (!strcmp(k, "cheat_log_candidates")) {
       g_cfg.cheat_log_candidates = atoi(v) ? 1 : 0;
     } else if (!strcmp(k, "launch_user_id")) {
@@ -297,6 +336,9 @@ config_load(void) {
     }
   }
   fclose(fp);
+  if (valid_lines == 0) {
+    cr_log("warn", "config", "config file exists but contains no valid key=value entries — using defaults");
+  }
   if (g_cfg.cheat_state_after_launch_delay_ms < 0 || g_cfg.cheat_state_after_launch_delay_ms > 60000) {
     g_cfg.cheat_state_after_launch_delay_ms = 8000;
     cr_log("warn", "config", "invalid cheat_state_after_launch_delay_ms, using default %d",

@@ -16,7 +16,8 @@ typedef struct cheatrunner_config {
   int launch_wait_timeout_ms;
   int cheat_engine;
   int cheat_validate_original_bytes;
-  int cheat_restore_rx;
+  int cheat_restore_rx;          /* legacy/deprecated: use cheat_restore_original_prot instead */
+  int cheat_restore_original_prot;
   int cheat_index_cache_ttl_sec;
   int allow_force_enable;
   int cheat_state_after_launch_delay_ms;
@@ -29,6 +30,11 @@ typedef struct cheatrunner_config {
   char cheat_mc4_address_mode[16];
   char cheat_shn_address_mode[16];
   int allow_unsafe_mc4_apply;
+  int allow_unsafe_shn_apply;
+  int allow_legacy_mc4_without_expected; /* permit MC4 write when no reliable expected bytes (manual apply) */
+  int allow_legacy_shn_without_expected;
+  char cheat_mc4_unverified_fallback[16]; /* block|legacy|absolute|relative */
+  char cheat_shn_unverified_fallback[16];
   int cheat_log_candidates;
   int launch_quick_verify_ms;
   int cheat_post_apply_watch_ms;

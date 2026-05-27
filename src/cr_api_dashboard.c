@@ -2,8 +2,13 @@
 #include "cr_api_internal.h"
 #include "cr_api_dashboard.h"
 
-/* Dashboard HTML is defined in cr_api.c as g_dashboard_html */
 extern const char g_dashboard_html[];
+extern const char g_dashboard_css[];
+extern const char g_dashboard_js[];
+
+static void send_asset(int fd, const char *content_type, const char *data) {
+  http_send_response(fd, 200, content_type, (const uint8_t *)data, strlen(data));
+}
 
 int
 cr_api_dashboard_handle(int fd, const char *method, const char *path,
@@ -11,8 +16,15 @@ cr_api_dashboard_handle(int fd, const char *method, const char *path,
   (void)method; (void)query; (void)body; (void)body_len;
   if (!strcmp(path, "/") || !strcmp(path, "/index.html") ||
       !strcmp(path, "/launcher.html")) {
-    http_send_response(fd, 200, "text/html; charset=utf-8",
-      (const uint8_t *)g_dashboard_html, strlen(g_dashboard_html));
+    send_asset(fd, "text/html; charset=utf-8", g_dashboard_html);
+    return 1;
+  }
+  if (!strcmp(path, "/dashboard.css")) {
+    send_asset(fd, "text/css; charset=utf-8", g_dashboard_css);
+    return 1;
+  }
+  if (!strcmp(path, "/dashboard.js")) {
+    send_asset(fd, "application/javascript; charset=utf-8", g_dashboard_js);
     return 1;
   }
   if (!strcmp(path, "/CheatRunner.png") || !strcmp(path, "/favicon.png") ||

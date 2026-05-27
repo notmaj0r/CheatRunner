@@ -21,6 +21,8 @@ along with this program; see the file COPYING. If not, see
 #include <machine/reg.h>
 
 int pt_attach(pid_t pid);
+/* Like pt_attach but fails with -2 if the traced process doesn't stop within timeout_ms */
+int pt_attach_timed(pid_t pid, int timeout_ms);
 int pt_detach(pid_t pid, int sig);
 int pt_step(pid_t pid);
 int pt_continue(pid_t pid, int sig);

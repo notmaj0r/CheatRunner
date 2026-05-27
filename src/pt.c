@@ -100,6 +100,34 @@ pt_attach(pid_t pid) {
 
 
 int
+pt_attach_timed(pid_t pid, int timeout_ms) {
+  if(sys_ptrace(PT_ATTACH, pid, 0, 0) == -1) {
+    return -1;
+  }
+
+  int waited_ms = 0;
+  const int step_ms = 10;
+  while(waited_ms < timeout_ms) {
+    int status = 0;
+    pid_t wret = waitpid(pid, &status, WNOHANG);
+    if(wret == pid) {
+      return 0;
+    }
+    if(wret == -1) {
+      sys_ptrace(PT_DETACH, pid, 0, 0);
+      return -1;
+    }
+    usleep((useconds_t)step_ms * 1000);
+    waited_ms += step_ms;
+  }
+
+  /* Timed out — detach to leave the process running */
+  sys_ptrace(PT_DETACH, pid, 0, 0);
+  return -2;
+}
+
+
+int
 pt_detach(pid_t pid, int sig) {
   if(sys_ptrace(PT_DETACH, pid, 0, sig) == -1) {
     return -1;

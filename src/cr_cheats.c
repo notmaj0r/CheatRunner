@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
@@ -20,6 +21,7 @@
 #include "cr_config.h"
 #include "cr_activity.h"
 #include "cr_notifications.h"
+#include "cr_version.h"
 #include "cr_titles.h"
 #include "cr_game_monitor.h"
 #include "cr_memory.h"
@@ -35,6 +37,18 @@ typedef struct applied_patch {
   uint8_t old_bytes[128];
   size_t len;
 } applied_patch_t;
+/* Returns 1 if filename appears to match preferred_ver (normalized equality check). */
+static int
+cheat_ver_matches(const char *name, const char *preferred_ver) {
+  if (!preferred_ver || !preferred_ver[0]) return 0;
+  if (case_contains(name, preferred_ver)) return 1;
+  char norm[32];
+  if (cr_version_normalize(preferred_ver, norm, sizeof(norm)) && case_contains(name, norm)) return 1;
+  char fver[32];
+  if (cr_version_from_filename(name, fver, sizeof(fver)) && cr_version_equal_known(fver, preferred_ver)) return 1;
+  return 0;
+}
+
 static int
 cheat_candidate_score(const cheat_file_search_t *ctx, const char *path, const char *name, int kind) {
   int score = 0;
@@ -53,7 +67,7 @@ cheat_candidate_score(const cheat_file_search_t *ctx, const char *path, const ch
   } else if (case_contains(path, "/cheats/shn/")) {
     score += 10;
   }
-  if (ctx->preferred_ver[0] && case_contains(name, ctx->preferred_ver)) {
+  if (ctx->preferred_ver[0] && cheat_ver_matches(name, ctx->preferred_ver)) {
     score += 40;
   }
   return score;
@@ -119,7 +133,22 @@ find_cheat_file_for_title_dir(const char *dir, int depth, cheat_file_search_t *c
       ctx->candidates[ctx->candidate_count].score = score;
       ctx->candidate_count++;
     }
-    if (score > ctx->best_score || (score == ctx->best_score && kind < ctx->best_kind)) {
+    int should_replace = (score > ctx->best_score) ||
+                         (score == ctx->best_score && kind < ctx->best_kind);
+    if (!should_replace && score == ctx->best_score && kind == ctx->best_kind && ctx->best_path[0]) {
+      char cur_vf[32] = "", new_vf[32] = "";
+      const char *cur_fname = strrchr(ctx->best_path, '/');
+      cur_fname = cur_fname ? cur_fname + 1 : ctx->best_path;
+      cr_version_from_filename(cur_fname, cur_vf, sizeof(cur_vf));
+      cr_version_from_filename(name, new_vf, sizeof(new_vf));
+      if (new_vf[0] && cr_version_compare(new_vf, cur_vf) > 0) {
+        char norm_pv[32];
+        cr_version_normalize(ctx->preferred_ver, norm_pv, sizeof(norm_pv));
+        if (!norm_pv[0] || cr_version_compare(new_vf, norm_pv) <= 0)
+          should_replace = 1;
+      }
+    }
+    if (should_replace) {
       if (ctx->log_candidates) {
         cr_log("info", "cheats", "candidate title=%s rank=%d format=%s path=%s", ctx->want, score, fmt_name, path);
       }
@@ -203,7 +232,22 @@ scan_local_txt_index(const char *fmt_name, int kind, cheat_file_search_t *ctx) {
       ctx->candidates[ctx->candidate_count].score = score;
       ctx->candidate_count++;
     }
-    if (score > ctx->best_score || (score == ctx->best_score && kind < ctx->best_kind)) {
+    int should_replace_ti = (score > ctx->best_score) ||
+                             (score == ctx->best_score && kind < ctx->best_kind);
+    if (!should_replace_ti && score == ctx->best_score && kind == ctx->best_kind && ctx->best_path[0]) {
+      char cur_vf[32] = "", new_vf[32] = "";
+      const char *cur_fname = strrchr(ctx->best_path, '/');
+      cur_fname = cur_fname ? cur_fname + 1 : ctx->best_path;
+      cr_version_from_filename(cur_fname, cur_vf, sizeof(cur_vf));
+      cr_version_from_filename(fname, new_vf, sizeof(new_vf));
+      if (new_vf[0] && cr_version_compare(new_vf, cur_vf) > 0) {
+        char norm_pv[32];
+        cr_version_normalize(ctx->preferred_ver, norm_pv, sizeof(norm_pv));
+        if (!norm_pv[0] || cr_version_compare(new_vf, norm_pv) <= 0)
+          should_replace_ti = 1;
+      }
+    }
+    if (should_replace_ti) {
       if (ctx->log_candidates) {
         cr_log("info", "cheats", "candidate (txt-idx) title=%s rank=%d format=%s path=%s", ctx->want, score, fmt_name, full);
       }
@@ -216,6 +260,217 @@ scan_local_txt_index(const char *fmt_name, int kind, cheat_file_search_t *ctx) {
   free(text);
 }
 
+/* Classify every candidate against the game version stored in ctx->preferred_ver.
+ * Also populates the candidate's version field for API consumers. */
+static void
+classify_candidates(cheat_file_search_t *ctx) {
+  for (int i = 0; i < ctx->candidate_count; i++) {
+    const char *fname = strrchr(ctx->candidates[i].path, '/');
+    fname = fname ? fname + 1 : ctx->candidates[i].path;
+    char fver[32];
+    int has_ver = cr_version_from_filename(fname, fver, sizeof(fver));
+    if (has_ver) {
+      snprintf(ctx->candidates[i].version, sizeof(ctx->candidates[i].version), "%s", fver);
+    } else {
+      ctx->candidates[i].version[0] = '\0';
+    }
+    if (!has_ver) {
+      ctx->candidates[i].match = CAND_MATCH_GENERIC;
+      continue;
+    }
+    if (!ctx->preferred_ver[0]) {
+      ctx->candidates[i].match = CAND_MATCH_UNKNOWN;
+      continue;
+    }
+    ctx->candidates[i].match = cr_version_equal(fver, ctx->preferred_ver)
+                                ? CAND_MATCH_EXACT : CAND_MATCH_WRONG_VERSION;
+  }
+}
+
+/* Pick the best candidate of a given match class; returns 1 if found. */
+static int
+best_by_match(cheat_file_search_t *ctx, int match_class,
+              char *path_out, size_t path_out_sz, int *kind_out, int *score_out) {
+  int bk = 99, bs = -1;
+  char bp[256] = {0};
+  for (int i = 0; i < ctx->candidate_count; i++) {
+    if (ctx->candidates[i].match != match_class) continue;
+    int ck = ctx->candidates[i].kind, cs = ctx->candidates[i].score;
+    if (!bp[0] || ck < bk || (ck == bk && cs > bs)) {
+      bk = ck; bs = cs;
+      snprintf(bp, sizeof(bp), "%s", ctx->candidates[i].path);
+    }
+  }
+  if (!bp[0]) return 0;
+  if (path_out) snprintf(path_out, path_out_sz, "%s", bp);
+  if (kind_out) *kind_out = bk;
+  if (score_out) *score_out = bs;
+  return 1;
+}
+
+/* Apply version-aware selection rules after classification:
+ * 1. preferred_ver known  →  exact → generic → block (wrong_version needs force)
+ * 2. preferred_ver unknown → use whatever score-based best was set during scan */
+static void
+apply_selection_rules(cheat_file_search_t *ctx) {
+  ctx->selection_kind = CHEAT_SEL_NONE;
+
+  if (ctx->preferred_ver[0]) {
+    /* 1a. Exact match wins unconditionally */
+    char ep[256]; int ek = 99, es = -1;
+    if (best_by_match(ctx, CAND_MATCH_EXACT, ep, sizeof(ep), &ek, &es)) {
+      snprintf(ctx->best_path, sizeof(ctx->best_path), "%s", ep);
+      ctx->best_kind  = ek;
+      ctx->best_score = es;
+      ctx->selection_kind = CHEAT_SEL_EXACT;
+      if (ctx->log_candidates) {
+        char norm_pv[32];
+        cr_version_normalize(ctx->preferred_ver, norm_pv, sizeof(norm_pv));
+        const char *efmt = ek == 1 ? "json" : (ek == 2 ? "shn" : "mc4");
+        cr_log("info", "cheat_select",
+               "exact_version_match title=%s ver=%s format=%s path=%s",
+               ctx->want, norm_pv[0] ? norm_pv : ctx->preferred_ver, efmt, ep);
+      }
+      return;
+    }
+    /* 1b. No exact: try generics (no version in filename) */
+    char gp[256]; int gk = 99, gs = -1;
+    if (best_by_match(ctx, CAND_MATCH_GENERIC, gp, sizeof(gp), &gk, &gs)) {
+      snprintf(ctx->best_path, sizeof(ctx->best_path), "%s", gp);
+      ctx->best_kind  = gk;
+      ctx->best_score = gs;
+      ctx->selection_kind = CHEAT_SEL_GENERIC;
+      return;
+    }
+    /* 1c. No exact, no generic: block auto-selection (wrong_version needs manual force) */
+    ctx->best_path[0] = '\0';
+    ctx->best_kind  = 99;
+    ctx->best_score = -1;
+    if (ctx->log_candidates && ctx->candidate_count > 0) {
+      cr_log("info", "cheat_select",
+             "no_auto_selection title=%s preferredVer=%s reason=only_wrong_version_candidates",
+             ctx->want, ctx->preferred_ver);
+    }
+    return;
+  }
+
+  /* 2. Game version unknown: keep score-based best already set by scan */
+  if (ctx->best_path[0]) {
+    ctx->selection_kind = CHEAT_SEL_GENERIC; /* treat as generic fallback */
+  }
+}
+
+/* ---- Manual cheat file selection ---- */
+
+#define CHEAT_SELECTIONS_PATH "/data/cheatrunner/cheat_selections.json"
+#define MAX_MANUAL_SELECTIONS 64
+
+typedef struct { char title_id[10]; char path[256]; } manual_sel_t;
+static manual_sel_t  g_manual_sel[MAX_MANUAL_SELECTIONS];
+static int           g_manual_sel_n  = 0;
+static int           g_manual_sel_loaded = 0;
+static pthread_mutex_t g_manual_sel_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void manual_sel_load_locked(void) {
+  if (g_manual_sel_loaded) return;
+  g_manual_sel_loaded = 1;
+  g_manual_sel_n = 0;
+  char *txt = NULL;
+  if (read_file_text(CHEAT_SELECTIONS_PATH, &txt) != 0 || !txt) return;
+  cJSON *root = cJSON_Parse(txt);
+  free(txt);
+  if (!root) return;
+  cJSON *item = root->child;
+  while (item && g_manual_sel_n < MAX_MANUAL_SELECTIONS) {
+    if (cJSON_IsString(item) && item->string && item->valuestring && item->valuestring[0]) {
+      char tid[10];
+      if (title_id_normalize(item->string, tid)) {
+        snprintf(g_manual_sel[g_manual_sel_n].title_id, 10, "%s", tid);
+        snprintf(g_manual_sel[g_manual_sel_n].path, 256, "%s", item->valuestring);
+        g_manual_sel_n++;
+      }
+    }
+    item = item->next;
+  }
+  cJSON_Delete(root);
+}
+
+static void manual_sel_save_locked(void) {
+  cJSON *root = cJSON_CreateObject();
+  if (!root) return;
+  for (int i = 0; i < g_manual_sel_n; i++) {
+    cJSON_AddStringToObject(root, g_manual_sel[i].title_id, g_manual_sel[i].path);
+  }
+  char *txt = cJSON_PrintUnformatted(root);
+  cJSON_Delete(root);
+  if (!txt) return;
+  FILE *f = fopen(CHEAT_SELECTIONS_PATH, "w");
+  if (f) { fwrite(txt, 1, strlen(txt), f); fclose(f); }
+  free(txt);
+}
+
+int
+cheat_manual_get(const char *title_id, char *out, size_t out_sz) {
+  char want[10];
+  if (!title_id || !out || out_sz < 2) return 0;
+  if (!title_id_normalize(title_id, want)) return 0;
+  pthread_mutex_lock(&g_manual_sel_lock);
+  manual_sel_load_locked();
+  for (int i = 0; i < g_manual_sel_n; i++) {
+    if (strcmp(g_manual_sel[i].title_id, want) == 0) {
+      snprintf(out, out_sz, "%s", g_manual_sel[i].path);
+      pthread_mutex_unlock(&g_manual_sel_lock);
+      return 1;
+    }
+  }
+  pthread_mutex_unlock(&g_manual_sel_lock);
+  return 0;
+}
+
+int
+cheat_manual_select(const char *title_id, const char *path) {
+  char want[10];
+  if (!title_id || !path || !path[0]) return -1;
+  if (!title_id_normalize(title_id, want)) return -1;
+  pthread_mutex_lock(&g_manual_sel_lock);
+  manual_sel_load_locked();
+  for (int i = 0; i < g_manual_sel_n; i++) {
+    if (strcmp(g_manual_sel[i].title_id, want) == 0) {
+      snprintf(g_manual_sel[i].path, 256, "%s", path);
+      manual_sel_save_locked();
+      pthread_mutex_unlock(&g_manual_sel_lock);
+      return 0;
+    }
+  }
+  if (g_manual_sel_n < MAX_MANUAL_SELECTIONS) {
+    snprintf(g_manual_sel[g_manual_sel_n].title_id, 10, "%s", want);
+    snprintf(g_manual_sel[g_manual_sel_n].path, 256, "%s", path);
+    g_manual_sel_n++;
+    manual_sel_save_locked();
+    pthread_mutex_unlock(&g_manual_sel_lock);
+    return 0;
+  }
+  pthread_mutex_unlock(&g_manual_sel_lock);
+  return -1;
+}
+
+void
+cheat_manual_select_clear(const char *title_id) {
+  char want[10];
+  if (!title_id) return;
+  if (!title_id_normalize(title_id, want)) return;
+  pthread_mutex_lock(&g_manual_sel_lock);
+  manual_sel_load_locked();
+  for (int i = 0; i < g_manual_sel_n; i++) {
+    if (strcmp(g_manual_sel[i].title_id, want) == 0) {
+      g_manual_sel[i] = g_manual_sel[--g_manual_sel_n];
+      manual_sel_save_locked();
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_manual_sel_lock);
+}
+
 /* Per-title throttle: only log candidates when the title changes. */
 static char g_last_cand_title[16] = "";
 static pthread_mutex_t g_last_cand_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -223,9 +478,23 @@ static pthread_mutex_t g_last_cand_lock = PTHREAD_MUTEX_INITIALIZER;
 int
 find_cheat_file_for_title(const char *title_id, char *out, size_t out_size, int *kind_out) {
   char want[10];
-  if (!title_id_normalize(title_id, want)) {
-    return 0;
+  if (!title_id_normalize(title_id, want)) return 0;
+
+  /* Check for a manual selection first */
+  char manual_path[256];
+  if (cheat_manual_get(want, manual_path, sizeof(manual_path))) {
+    struct stat mst;
+    if (stat(manual_path, &mst) == 0 && S_ISREG(mst.st_mode)) {
+      int n = snprintf(out, out_size, "%s", manual_path);
+      if (n > 0 && (size_t)n < out_size) {
+        if (kind_out) *kind_out = recognised_cheat_extension(manual_path);
+        return 1;
+      }
+    }
+    /* File gone — clear stale manual selection */
+    cheat_manual_select_clear(want);
   }
+
   cheat_file_search_t ctx;
   memset(&ctx, 0, sizeof(ctx));
   snprintf(ctx.want_buf, sizeof(ctx.want_buf), "%s", want);
@@ -253,52 +522,84 @@ find_cheat_file_for_title(const char *title_id, char *out, size_t out_size, int 
     read_param_value_by_title_id(want, "appVersion", ctx.preferred_ver, sizeof(ctx.preferred_ver));
   }
 
-  /* Recursive directory scan covers json/, shn/, mc4/ sub-dirs automatically */
   find_cheat_file_for_title_dir(CHEATRUNNER_CHEATS_DIR, 0, &ctx);
-  /* Also scan txt index files for locally saved cheat entries */
+  find_cheat_file_for_title_dir(ETAHEN_CHEATS_DIR, 0, &ctx);
+  find_cheat_file_for_title_dir(ELF_ARSENAL_CHEATS_DIR, 0, &ctx);
   scan_local_txt_index("json", 1, &ctx);
   scan_local_txt_index("shn", 2, &ctx);
   scan_local_txt_index("mc4", 3, &ctx);
 
-  if (!ctx.best_path[0]) {
-    return 0;
-  }
+  classify_candidates(&ctx);
+  apply_selection_rules(&ctx);
+
+  if (!ctx.best_path[0]) return 0;
   const char *sel_fmt = ctx.best_kind == 1 ? "json" : (ctx.best_kind == 2 ? "shn" : "mc4");
   if (ctx.log_candidates) {
-    cr_log("info", "cheats", "selected cheat title=%s rank=%d format=%s path=%s", want, ctx.best_score, sel_fmt,
-           ctx.best_path);
+    cr_log("info", "cheats", "selected cheat title=%s rank=%d format=%s path=%s ver=%s",
+           want, ctx.best_score, sel_fmt,
+           ctx.best_path, ctx.preferred_ver[0] ? ctx.preferred_ver : "unknown");
   }
   int n = snprintf(out, out_size, "%s", ctx.best_path);
-  if (n <= 0 || (size_t)n >= out_size) {
-    return 0;
-  }
-  if (kind_out) {
-    *kind_out = ctx.best_kind;
-  }
+  if (n <= 0 || (size_t)n >= out_size) return 0;
+  if (kind_out) *kind_out = ctx.best_kind;
   return 1;
 }
 
-/* Fills *ctx_out with all candidates + best selection without logging. */
+/* Fills *ctx_out with all candidates + best selection.
+ * override_ver: if non-NULL and non-empty, used as preferred_ver (e.g. live game version);
+ *               otherwise falls back to static SFO lookup. */
 int
-find_cheat_candidates(const char *title_id, cheat_file_search_t *ctx_out) {
+find_cheat_candidates_ex(const char *title_id, const char *override_ver, cheat_file_search_t *ctx_out) {
   char want[10];
   if (!title_id_normalize(title_id, want)) return 0;
   cheat_file_search_t ctx;
   memset(&ctx, 0, sizeof(ctx));
   snprintf(ctx.want_buf, sizeof(ctx.want_buf), "%s", want);
-  ctx.want      = ctx.want_buf;
-  ctx.best_kind = 99;
-  ctx.best_score= -1;
+  ctx.want       = ctx.want_buf;
+  ctx.best_kind  = 99;
+  ctx.best_score = -1;
   ctx.log_candidates = 0;
-  read_param_value_by_title_id(want, "contentVersion", ctx.preferred_ver, sizeof(ctx.preferred_ver));
-  if (!ctx.preferred_ver[0])
-    read_param_value_by_title_id(want, "appVersion", ctx.preferred_ver, sizeof(ctx.preferred_ver));
+
+  if (override_ver && override_ver[0]) {
+    snprintf(ctx.preferred_ver, sizeof(ctx.preferred_ver), "%s", override_ver);
+  } else {
+    read_param_value_by_title_id(want, "contentVersion", ctx.preferred_ver, sizeof(ctx.preferred_ver));
+    if (!ctx.preferred_ver[0])
+      read_param_value_by_title_id(want, "appVersion", ctx.preferred_ver, sizeof(ctx.preferred_ver));
+  }
+
   find_cheat_file_for_title_dir(CHEATRUNNER_CHEATS_DIR, 0, &ctx);
+  find_cheat_file_for_title_dir(ETAHEN_CHEATS_DIR, 0, &ctx);
+  find_cheat_file_for_title_dir(ELF_ARSENAL_CHEATS_DIR, 0, &ctx);
   scan_local_txt_index("json", 1, &ctx);
   scan_local_txt_index("shn", 2, &ctx);
   scan_local_txt_index("mc4", 3, &ctx);
+
+  classify_candidates(&ctx);
+  apply_selection_rules(&ctx);
+
+  /* Check for a manual selection and mark it in candidates */
+  char manual_path[256];
+  if (cheat_manual_get(want, manual_path, sizeof(manual_path))) {
+    /* Find matching candidate and override selection */
+    for (int i = 0; i < ctx.candidate_count; i++) {
+      if (strcmp(ctx.candidates[i].path, manual_path) == 0) {
+        snprintf(ctx.best_path, sizeof(ctx.best_path), "%s", manual_path);
+        ctx.best_kind  = ctx.candidates[i].kind;
+        ctx.best_score = ctx.candidates[i].score;
+        ctx.selection_kind = CHEAT_SEL_MANUAL;
+        break;
+      }
+    }
+  }
+
   if (ctx_out) *ctx_out = ctx;
   return ctx.best_path[0] ? 1 : 0;
+}
+
+int
+find_cheat_candidates(const char *title_id, cheat_file_search_t *ctx_out) {
+  return find_cheat_candidates_ex(title_id, NULL, ctx_out);
 }
 
 
@@ -372,7 +673,57 @@ int mod_disabled_check(const char *tid, pid_t pid, int mod) {
   pthread_mutex_unlock(&g_mods_disabled_lock); return 0;
 }
 
-crash_guard_state_t g_crash_guard = {0};
+/* Tracks mods explicitly enabled this session so BASELINE_UNKNOWN can show as ON_UNVERIFIED. */
+static mod_disabled_rec_t g_mods_enabled_arr[MOD_DISABLED_MAX];
+static int g_mods_enabled_n = 0;
+static pthread_mutex_t g_mods_enabled_lock = PTHREAD_MUTEX_INITIALIZER;
+static void mod_enabled_set(const char *tid, pid_t pid, int mod) {
+  pthread_mutex_lock(&g_mods_enabled_lock);
+  for (int i = 0; i < g_mods_enabled_n; i++) {
+    if (g_mods_enabled_arr[i].mod_index == mod && strcmp(g_mods_enabled_arr[i].title_id, tid) == 0) {
+      g_mods_enabled_arr[i].pid = pid;
+      pthread_mutex_unlock(&g_mods_enabled_lock); return;
+    }
+  }
+  if (g_mods_enabled_n < MOD_DISABLED_MAX) {
+    snprintf(g_mods_enabled_arr[g_mods_enabled_n].title_id, sizeof(g_mods_enabled_arr[0].title_id), "%s", tid);
+    g_mods_enabled_arr[g_mods_enabled_n].pid = pid;
+    g_mods_enabled_arr[g_mods_enabled_n].mod_index = mod;
+    g_mods_enabled_n++;
+  }
+  pthread_mutex_unlock(&g_mods_enabled_lock);
+}
+static void mod_enabled_clear(const char *tid, int mod) {
+  pthread_mutex_lock(&g_mods_enabled_lock);
+  for (int i = 0; i < g_mods_enabled_n; i++) {
+    if (g_mods_enabled_arr[i].mod_index == mod && strcmp(g_mods_enabled_arr[i].title_id, tid) == 0) {
+      g_mods_enabled_arr[i] = g_mods_enabled_arr[--g_mods_enabled_n]; break;
+    }
+  }
+  pthread_mutex_unlock(&g_mods_enabled_lock);
+}
+int mod_enabled_check(const char *tid, pid_t pid, int mod) {
+  pthread_mutex_lock(&g_mods_enabled_lock);
+  for (int i = 0; i < g_mods_enabled_n; i++) {
+    if (g_mods_enabled_arr[i].mod_index == mod && g_mods_enabled_arr[i].pid == pid &&
+        strcmp(g_mods_enabled_arr[i].title_id, tid) == 0) {
+      pthread_mutex_unlock(&g_mods_enabled_lock); return 1;
+    }
+  }
+  pthread_mutex_unlock(&g_mods_enabled_lock); return 0;
+}
+void mod_enabled_clear_for_pid(pid_t pid) {
+  pthread_mutex_lock(&g_mods_enabled_lock);
+  for (int i = g_mods_enabled_n - 1; i >= 0; i--) {
+    if (g_mods_enabled_arr[i].pid == pid) {
+      g_mods_enabled_arr[i] = g_mods_enabled_arr[--g_mods_enabled_n];
+    }
+  }
+  pthread_mutex_unlock(&g_mods_enabled_lock);
+}
+
+crash_guard_state_t g_crash_guard_arr[CRASH_GUARD_MAX];
+int g_crash_guard_n = 0;
 crash_suspect_rec_t g_crash_suspects[CRASH_SUSPECT_MAX];
 int g_crash_suspects_n = 0;
 pthread_mutex_t g_crash_guard_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -471,13 +822,20 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
   int engine_enabled    = g_cfg.cheat_engine;
   int validate_original = g_cfg.cheat_validate_original_bytes;
   int restore_rx        = g_cfg.cheat_restore_rx;
+  int restore_orig_prot = g_cfg.cheat_restore_original_prot;
   int auto_detect       = g_cfg.cheat_address_auto_detect;
   int allow_unsafe_mc4  = g_cfg.allow_unsafe_mc4_apply;
+  int allow_unsafe_shn  = g_cfg.allow_unsafe_shn_apply;
+  int allow_legacy_mc4  = g_cfg.allow_legacy_mc4_without_expected;
+  int allow_legacy_shn  = g_cfg.allow_legacy_shn_without_expected;
+  char mc4_unverified_fb[16]; snprintf(mc4_unverified_fb, sizeof(mc4_unverified_fb), "%s", g_cfg.cheat_mc4_unverified_fallback);
+  char shn_unverified_fb[16]; snprintf(shn_unverified_fb, sizeof(shn_unverified_fb), "%s", g_cfg.cheat_shn_unverified_fallback);
   int one_at_a_time     = g_cfg.cheat_apply_one_at_a_time;
   int cooldown_ms       = g_cfg.cheat_apply_cooldown_ms;
   int min_stable_ms     = g_cfg.cheat_min_stable_ms;
   int mc_fixup          = g_cfg.cheat_master_code_fixup;
   int codecave_fb       = g_cfg.cheat_codecave_fallback;
+  int log_candidates    = g_cfg.cheat_log_candidates;
   pthread_mutex_unlock(&g_cfg_lock);
   if (!engine_enabled) {
     snprintf(err, err_size, "cheat engine disabled");
@@ -498,18 +856,30 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
   if (!running_name[0]) {
     snprintf(running_name, sizeof(running_name), "%s", running_title);
   }
+  /* read_running_state() never populates started_at; inherit from the game monitor's cached state. */
+  if (run_state.started_at == 0) {
+    running_game_state_t cached_st;
+    running_state_get(&cached_st);
+    if (cached_st.running && cached_st.started_at > 0 &&
+        strcmp(cached_st.title_id, running_title) == 0) {
+      run_state.started_at = cached_st.started_at;
+    }
+  }
   if (!title_id_normalize(running_title, run_norm) || !title_id_normalize(title_id, cheat_norm) ||
       strcmp(run_norm, cheat_norm) != 0) {
     snprintf(err, err_size, "running game (%s) does not match cheat target (%s)", running_title, title_id);
     return -1;
   }
 
-  /* App stability check: game must have been running for at least cheat_min_stable_ms */
-  if (min_stable_ms > 0 && run_state.started_at > 0) {
+  /* App stability check: game must have been running for at least cheat_min_stable_ms.
+   * started_at == 0 means the game was just detected (< 1 poll interval) — treat uptime as 0. */
+  if (min_stable_ms > 0) {
     uint64_t uptime_ms = 0;
-    uint64_t now_sec = (uint64_t)time(NULL);
-    if (now_sec > run_state.started_at)
-      uptime_ms = (now_sec - run_state.started_at) * 1000;
+    if (run_state.started_at > 0) {
+      uint64_t now_sec = (uint64_t)time(NULL);
+      if (now_sec > run_state.started_at)
+        uptime_ms = (now_sec - run_state.started_at) * 1000;
+    }
     if (uptime_ms < (uint64_t)min_stable_ms) {
       snprintf(err, err_size, "app_not_stable");
       cr_log("warn", "cheats.guard",
@@ -630,12 +1000,27 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
          "pausing scanners during apply title=%s mod=%d pid=%d appId=0x%x",
          title_id, mod_index, (int)pid, app_id_live);
 
-  if (pt_attach(pid) < 0) {
-    g_cheat_applying = 0;
-    pthread_mutex_unlock(&g_cheat_apply_lock);
-    cJSON_Delete(root);
-    snprintf(err, err_size, "pt_attach failed (%d)", errno);
-    return -1;
+  {
+    int _at = pt_attach_timed(pid, 3000);
+    if (_at < 0) {
+      g_cheat_applying = 0;
+      pthread_mutex_unlock(&g_cheat_apply_lock);
+      cJSON_Delete(root);
+      if (_at == -2) {
+        snprintf(err, err_size, "pt_attach timed out — game process unresponsive");
+        cr_log("warn", "cheats.guard", "pt_attach timeout pid=%d title=%s", (int)pid, title_id);
+      } else {
+        pid_t live_pid = (app_id_live > 0) ? find_pid_for_app_id((uint32_t)app_id_live) : -1;
+        if (live_pid <= 0) {
+          snprintf(err, err_size, "game has exited");
+        } else if (live_pid != pid) {
+          snprintf(err, err_size, "game restarted (pid changed)");
+        } else {
+          snprintf(err, err_size, "pt_attach failed (%d)", errno);
+        }
+      }
+      return -1;
+    }
   }
   attached = 1;
 
@@ -726,6 +1111,9 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
         snprintf(err, err_size, "entry[%d] invalid offset '%s'", pre_n, off_j->valuestring);
         break;
       }
+      /* expected_reliable and resolve_st must be visible to the validation block below. */
+      int expected_reliable = 0;
+      cr_addr_resolve_status_t resolve_st = CR_ADDR_RESOLVE_OK_VERIFIED;
       intptr_t addr = 0;
       {
         int af = 0, inj = 0, adet = auto_detect;
@@ -736,8 +1124,49 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
         if (do_mc_fixup && mc_base_off != 0) {
           off_u = fixup_mc_dependent_addr(mc_base_off, off_u);
         }
-        const uint8_t *expect_cmp = exp_len > 0 ? exp_bytes : off_bytes;
-        addr = cheat_resolve_write_addr(pid, mod_base, off_u, af, inj, adet, on_bytes, on_len, expect_cmp);
+        /* Only use off_bytes as a reliable expected baseline for JSON.
+         * MC4/SHN ValueOff is NOT a reliable original-byte baseline unless
+         * the parser provided an explicit expected field (exp_len > 0). */
+        const uint8_t *expect_cmp = NULL;
+        if (exp_len > 0) {
+          expect_cmp        = exp_bytes;
+          expected_reliable = 1;
+        } else if (kind == 1 && off_len > 0) {
+          expect_cmp        = off_bytes;
+          expected_reliable = 1;
+        }
+        /* Fallback policy for MC4/SHN without a reliable expected baseline. */
+        cr_addr_fallback_policy_t fallback_pol = CR_ADDR_FALLBACK_BLOCK;
+        if (!expected_reliable && kind != 1) {
+          const char *fb_str = (kind == 2) ? shn_unverified_fb : mc4_unverified_fb;
+          if (strcmp(fb_str, "legacy") == 0)         fallback_pol = CR_ADDR_FALLBACK_LEGACY;
+          else if (strcmp(fb_str, "absolute") == 0)  fallback_pol = CR_ADDR_FALLBACK_ABSOLUTE;
+          else if (strcmp(fb_str, "relative") == 0)  fallback_pol = CR_ADDR_FALLBACK_RELATIVE;
+        }
+        addr = cheat_resolve_write_addr_ex(pid, mod_base, off_u, af, inj, adet,
+                                           on_bytes, on_len, expect_cmp, expected_reliable,
+                                           fallback_pol, &resolve_st, 0 /*silent=false*/);
+        if (resolve_st == CR_ADDR_RESOLVE_UNRESOLVED) {
+          rc = -1;
+          snprintf(err, err_size,
+                   "entry[%d] address_unresolved: abs=0x%llx and rel candidate neither matched expected bytes",
+                   pre_n, (unsigned long long)off_u);
+          break;
+        }
+        if (resolve_st == CR_ADDR_RESOLVE_BLOCKED_NO_BASELINE) {
+          const char *fmt_name = (kind == 2) ? "shn" : "mc4";
+          rc = -1;
+          snprintf(err, err_size,
+                   "entry[%d] baseline_unknown_blocked: %s has no reliable expected bytes; "
+                   "set allow_legacy_%s_without_expected=1 or cheat_%s_unverified_fallback=legacy",
+                   pre_n, fmt_name, fmt_name, fmt_name);
+          break;
+        }
+        if (resolve_st == CR_ADDR_RESOLVE_AMBIGUOUS) {
+          cr_log("warn", "cheats",
+                 "entry[%d] address_ambiguous off=0x%llx; using relative addr=0x%lx title=%s mod=%d",
+                 pre_n, (unsigned long long)off_u, (long)addr, title_id, mod_index);
+        }
       }
       const uint8_t *new_data = effective_on ? on_bytes : off_bytes;
       size_t wlen = on_len;
@@ -746,28 +1175,69 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
         snprintf(err, err_size, "entry[%d] pre-read failed at 0x%lx", pre_n, (long)addr);
         break;
       }
+      /* Per-entry debug trace: log both address candidates and current bytes at each. */
+      if (log_candidates && kind != 1) {
+        intptr_t abs_cand_dbg = (intptr_t)off_u;
+        intptr_t rel_cand_dbg = mod_base + (intptr_t)off_u;
+        const char *fmt_name_dbg = (kind == 2) ? "shn" : "mc4";
+        const char *policy_dbg = (kind == 2) ? shn_unverified_fb : mc4_unverified_fb;
+        char sel_hex[52] = {0}, abs_hex[52] = "(not read)", rel_hex[52] = "(not read)";
+        fmt_hex16(cur_bytes, wlen, sel_hex, sizeof(sel_hex));
+        uint8_t probe_abs[128], probe_rel[128];
+        if (wlen <= sizeof(probe_abs) && read_process_memory(pid, abs_cand_dbg, probe_abs, wlen) == 0)
+          fmt_hex16(probe_abs, wlen, abs_hex, sizeof(abs_hex));
+        if (wlen <= sizeof(probe_rel) && read_process_memory(pid, rel_cand_dbg, probe_rel, wlen) == 0)
+          fmt_hex16(probe_rel, wlen, rel_hex, sizeof(rel_hex));
+        cr_log("info", "cheats.addr_debug",
+               "format=%s mod=%d entry=%d off=0x%llx base=0x%lx abs=0x%lx rel=0x%lx selected=0x%lx "
+               "policy=%s expected_reliable=%d abs_flag=%d cur_at_sel=[%s] cur_at_abs=[%s] cur_at_rel=[%s]",
+               fmt_name_dbg, mod_index, pre_n, (unsigned long long)off_u, (long)mod_base,
+               (long)abs_cand_dbg, (long)rel_cand_dbg, (long)addr,
+               policy_dbg, expected_reliable, cJSON_IsTrue(abs_j) ? 1 : 0,
+               sel_hex, abs_hex, rel_hex);
+      }
       if (validate_original) {
         if (effective_on) {
-          int off_reliable = (kind == 1) || (exp_len > 0);
-          if (!off_reliable) {
-            if (!allow_unsafe_mc4) {
+          if (!expected_reliable) {
+            int is_legacy_unverified = (resolve_st == CR_ADDR_RESOLVE_OK_UNVERIFIED_LEGACY  ||
+                                        resolve_st == CR_ADDR_RESOLVE_OK_UNVERIFIED_ABSOLUTE ||
+                                        resolve_st == CR_ADDR_RESOLVE_OK_UNVERIFIED_RELATIVE);
+            int allow_unsafe      = (kind == 2) ? allow_unsafe_shn : allow_unsafe_mc4;
+            int allow_legacy_noex = (kind == 2) ? allow_legacy_shn : allow_legacy_mc4;
+            if (!allow_unsafe && !(is_legacy_unverified && allow_legacy_noex)) {
+              const char *fmt_unsafe = (kind == 2) ? "shn" : "mc4";
               rc = -1;
               snprintf(err, err_size,
-                       "entry[%d] MC4/SHN no reliable baseline at 0x%lx; set allow_unsafe_mc4_apply=1 to proceed",
-                       pre_n, (long)addr);
+                       "entry[%d] %s no reliable baseline at 0x%lx; "
+                       "set allow_legacy_%s_without_expected=1 to proceed",
+                       pre_n, fmt_unsafe, (long)addr, fmt_unsafe);
               break;
             }
-            cr_log("info", "cheats", "MC4/SHN trainer mode: applying without baseline at 0x%lx", (long)addr);
+            cr_log("warn", "cheats", "%s %s mode: applying without baseline at 0x%lx title=%s mod=%d",
+                   (kind == 2) ? "shn" : "mc4",
+                   is_legacy_unverified ? "legacy_unverified" : "unsafe",
+                   (long)addr, title_id, mod_index);
           } else {
             const uint8_t *must = (exp_len > 0) ? exp_bytes : off_bytes;
             if (memcmp(cur_bytes, must, wlen) != 0) {
-              rc = -1;
-              snprintf(err, err_size, "entry[%d] bytes mismatch before ON at 0x%lx", pre_n, (long)addr);
-              break;
+              if (memcmp(cur_bytes, on_bytes, wlen) == 0) {
+                /* Bytes are already at ON state — cheat was enabled before CheatRunner
+                 * restarted and lost session tracking. Writing ON on top of ON is idempotent. */
+                cr_log("warn", "cheats",
+                       "entry[%d] already_on at 0x%lx — re-enabling after session loss title=%s mod=%d",
+                       pre_n, (long)addr, title_id, mod_index);
+              } else {
+                rc = -1;
+                snprintf(err, err_size, "entry[%d] bytes mismatch before ON at 0x%lx", pre_n, (long)addr);
+                break;
+              }
             }
           }
         } else {
-          if (memcmp(cur_bytes, on_bytes, wlen) != 0) {
+          if (!expected_reliable) {
+            cr_log("warn", "cheats", "%s legacy_unverified mode: disabling without verification at 0x%lx title=%s mod=%d",
+                   (kind == 2) ? "shn" : "mc4", (long)addr, title_id, mod_index);
+          } else if (memcmp(cur_bytes, on_bytes, wlen) != 0) {
             rc = -1;
             snprintf(err, err_size, "entry[%d] bytes mismatch before OFF at 0x%lx", pre_n, (long)addr);
             break;
@@ -780,6 +1250,37 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
       memcpy(wi_data[pre_n], new_data, wlen);
       wi_is_cave[pre_n] = (wlen >= 16) ? 1 : 0;
       pre_n++;
+    }
+  }
+
+  /* ---- Cave-page promotion: reclassify short writes on known-cave pages ----
+   * A write >=16 bytes establishes its page as a "cave page" for this mod.
+   * Any shorter write to that same page is also part of the cave region and must
+   * follow the same enable/disable ordering (caves-first / hooks-first). */
+  if (rc == 0 && pre_n > 1) {
+    intptr_t cave_pgs[64];
+    int cave_pg_n = 0;
+    for (int _i = 0; _i < pre_n; _i++) {
+      if (wi_is_cave[_i]) {
+        intptr_t pg = (intptr_t)ROUND_PG_DOWN((uintptr_t)applied[_i].addr);
+        int found = 0;
+        for (int _j = 0; _j < cave_pg_n; _j++) if (cave_pgs[_j] == pg) { found = 1; break; }
+        if (!found && cave_pg_n < 64) cave_pgs[cave_pg_n++] = pg;
+      }
+    }
+    for (int _i = 0; _i < pre_n && cave_pg_n > 0; _i++) {
+      if (!wi_is_cave[_i]) {
+        intptr_t pg = (intptr_t)ROUND_PG_DOWN((uintptr_t)applied[_i].addr);
+        for (int _j = 0; _j < cave_pg_n; _j++) {
+          if (cave_pgs[_j] == pg) {
+            wi_is_cave[_i] = 1;
+            cr_log("info", "cheats",
+                   "entry[%d] promoted to cave by page addr=0x%lx len=%zu title=%s mod=%d",
+                   _i, (long)applied[_i].addr, applied[_i].len, title_id, mod_index);
+            break;
+          }
+        }
+      }
     }
   }
 
@@ -810,13 +1311,14 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
         const uint8_t *data = wi_data[i];
         intptr_t _pg = (intptr_t)ROUND_PG_DOWN((uintptr_t)addr);
         size_t   _sp = (size_t)(ROUND_PG_UP((uintptr_t)addr + wlen) - (uintptr_t)_pg);
-        cr_log("info", "cheats.mem",
+        cr_log("debug", "cheats.mem",
                "begin title=%s mod=%d write=%d addr=0x%lx len=%zu page=0x%lx span=0x%zx type=%s",
                title_id, mod_index, write_ok_n, (long)addr, wlen, (long)_pg, _sp,
                wi_is_cave[i] ? "cave" : "hook");
-        int wrc = write_process_memory(pid, addr, data, wlen);
+        int orig_prot_w = -1;
+        int wrc = write_process_memory_ex(pid, addr, data, wlen, &orig_prot_w);
         int used_cave = 0;
-        /* Code-cave fallback: if write was silently dropped (-3) and config allows it */
+        /* Code-cave fallback: if internal verify mismatch (-3) and config allows it */
         if (wrc == -3 && codecave_fb) {
           cr_log("info", "cheats.mem", "write_dropped trying codecave addr=0x%lx len=%zu", (long)addr, wlen);
           wrc = write_via_codecave(pid, addr, data, wlen);
@@ -824,41 +1326,59 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
             used_cave = 1;
           }
         }
-        cr_log("info", "cheats.mem", "write_rc=%d cave=%d addr=0x%lx", wrc, used_cave, (long)addr);
+        cr_log("debug", "cheats.mem", "write_rc=%d cave=%d addr=0x%lx orig_prot=%d",
+               wrc, used_cave, (long)addr, orig_prot_w);
         if (wrc != 0) {
           rc = -1;
           snprintf(err, err_size, "entry[%d] write failed at 0x%lx (rc=%d)", i, (long)addr, wrc);
           break;
         }
         if (!used_cave) {
-          /* External verify — page still RWX after write_process_memory success */
-          uint8_t cur_v[128];
-          int rdrc = read_process_memory(pid, addr, cur_v, wlen);
-          if (rdrc != 0) {
-            rc = -1;
-            snprintf(err, err_size, "entry[%d] readback failed at 0x%lx (rc=%d)", i, (long)addr, rdrc);
-            break;
+          /* External verify: write_process_memory_ex already runs an internal verify while the
+           * page is RWX and restores orig_prot before returning.  If orig_prot lacked PROT_READ
+           * (e.g. PROT_EXEC=4 only) the page is no longer readable — skip external readback and
+           * trust the internal verify that already passed. */
+          if (orig_prot_w >= 0 && !(orig_prot_w & PROT_READ)) {
+            cr_log("debug", "cheats.mem",
+                   "ext_verify_skip addr=0x%lx len=%zu reason=execute_only_page orig_prot=%d",
+                   (long)addr, wlen, orig_prot_w);
+          } else {
+            /* Page was readable before write — attempt external readback.
+             * On some PS5 games, pages report readable protection but PT_IO
+             * cannot read them after prot restoration.  Int_verify already
+             * passed while the page was RWX — treat readback failure as a
+             * soft warning and trust int_verify rather than aborting. */
+            uint8_t cur_v[128];
+            int rdrc = read_process_memory(pid, addr, cur_v, wlen);
+            if (rdrc != 0) {
+              cr_log("warn", "cheats.mem",
+                     "ext_verify_unreadable addr=0x%lx len=%zu orig_prot=%d — int_verify ok, continuing",
+                     (long)addr, wlen, orig_prot_w);
+            } else if (memcmp(cur_v, data, wlen) != 0) {
+              char exp_h[52] = {0}, got_h[52] = {0};
+              fmt_hex16(data, wlen, exp_h, sizeof(exp_h));
+              fmt_hex16(cur_v, wlen, got_h, sizeof(got_h));
+              cr_log("error", "cheats.mem",
+                     "ext_verify_fail title=%s mod=%d write=%d addr=0x%lx exp=[%s] got=[%s]",
+                     title_id, mod_index, write_ok_n, (long)addr, exp_h, got_h);
+              rc = -1;
+              snprintf(err, err_size,
+                       "entry[%d] verify failed at 0x%lx — bytes not observed after write; see cheats.mem logs",
+                       i, (long)addr);
+              break;
+            }
           }
-          if (memcmp(cur_v, data, wlen) != 0) {
-            char exp_h[52] = {0}, got_h[52] = {0};
-            fmt_hex16(data, wlen, exp_h, sizeof(exp_h));
-            fmt_hex16(cur_v, wlen, got_h, sizeof(got_h));
-            cr_log("error", "cheats.mem",
-                   "ext_verify_fail title=%s mod=%d write=%d addr=0x%lx exp=[%s] got=[%s]",
-                   title_id, mod_index, write_ok_n, (long)addr, exp_h, got_h);
-            rc = -1;
-            snprintf(err, err_size,
-                     "entry[%d] verify failed at 0x%lx — bytes not observed after write; see cheats.mem logs",
-                     i, (long)addr);
-            break;
-          }
-          /* PS5 is x86-64: i/d caches coherent; mprotect RX provides the serialization barrier. */
-          cr_log("info", "cheats.mem",
-                 "icache_sync addr=0x%lx len=%zu x86_coherent mprotect_barrier",
+          /* PS5 is x86-64: i/d caches coherent; write_process_memory_ex already restored orig_prot.
+           * restore_rx is a legacy flag (default=0). Only apply if explicitly set AND
+           * cheat_restore_original_prot is disabled, to avoid stomping the correct protection. */
+          cr_log("debug", "cheats.mem",
+                 "icache_sync addr=0x%lx len=%zu x86_coherent prot_handled_by_write_fn",
                  (long)addr, wlen);
-          if (restore_rx) {
+          if (restore_rx && !restore_orig_prot) {
             int rrc = kernel_mprotect(pid, _pg, _sp, PROT_READ | PROT_EXEC);
-            cr_log("info", "cheats.mem", "restore_rx page=0x%lx span=0x%zx rc=%d", (long)_pg, _sp, rrc);
+            cr_log("warn", "cheats.mem",
+                   "restore_rx_legacy page=0x%lx span=0x%zx rc=%d (deprecated: use cheat_restore_original_prot)",
+                   (long)_pg, _sp, rrc);
           }
         }
         cr_log("info", "cheats", "write[%d] addr=0x%lx len=%zu type=%s ok",
@@ -875,6 +1395,14 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
     for (int i = write_ok_n - 1; i >= 0; i--) {
       int wi = written_order[i];
       int rrc = write_process_memory(pid, applied[wi].addr, applied[wi].old_bytes, applied[wi].len);
+      if (rrc == -5) {
+        /* kernel_get_vmem_protection failed (may occur after multiple mprotect cycles);
+         * fall back to forced RWX write to give rollback the best chance of succeeding. */
+        rrc = write_process_memory_forced(pid, applied[wi].addr, applied[wi].old_bytes, applied[wi].len);
+        if (rrc == 0)
+          cr_log("warn", "cheats.rollback", "write[%d] addr=0x%lx len=%zu forced_ok (vmem_prot_unavail)",
+                 i, (long)applied[wi].addr, applied[wi].len);
+      }
       if (rrc == 0) {
         uint8_t chk[128];
         int vok = (applied[wi].len <= sizeof(chk) &&
@@ -902,10 +1430,13 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
     activity_save();
     notification_add(effective_on ? "cheat_applied" : "cheat_disabled", "Cheat %s: %s #%d",
                      effective_on ? "applied" : "disabled", title_id, mod_index);
+    notify("CheatRunner: %s %s", mod_name, effective_on ? "ON" : "OFF");
     if (effective_on) {
       mod_disabled_clear(title_id, mod_index);
+      mod_enabled_set(title_id, pid, mod_index);
     } else {
       mod_disabled_set(title_id, pid, mod_index);
+      mod_enabled_clear(title_id, mod_index);
     }
     cr_log("info", "cheats", "applied %s mod=%d state=%d appId=0x%x",
            title_id, mod_index, effective_on, app_id_live);
@@ -919,11 +1450,24 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
         int _hcc = 0, _hch = 0;
         for (int _i = 0; _i < pre_n; _i++) { if (wi_is_cave[_i]) _hcc++; else _hch++; }
         pthread_mutex_lock(&g_crash_guard_lock);
-        snprintf(g_crash_guard.title_id, sizeof(g_crash_guard.title_id), "%s", title_id);
-        g_crash_guard.mod_index = mod_index;
-        snprintf(g_crash_guard.mod_name, sizeof(g_crash_guard.mod_name), "%s", mod_name);
-        g_crash_guard.pid = pid;
-        g_crash_guard.enabled_at_ms = now_ms();
+        {
+          /* Replace existing entry for same mod, or append a new one */
+          int _gi = -1;
+          for (int _k = 0; _k < g_crash_guard_n; _k++) {
+            if (g_crash_guard_arr[_k].mod_index == mod_index &&
+                strcmp(g_crash_guard_arr[_k].title_id, title_id) == 0) {
+              _gi = _k; break;
+            }
+          }
+          if (_gi < 0 && g_crash_guard_n < CRASH_GUARD_MAX) _gi = g_crash_guard_n++;
+          if (_gi >= 0) {
+            snprintf(g_crash_guard_arr[_gi].title_id, sizeof(g_crash_guard_arr[_gi].title_id), "%s", title_id);
+            g_crash_guard_arr[_gi].mod_index    = mod_index;
+            snprintf(g_crash_guard_arr[_gi].mod_name, sizeof(g_crash_guard_arr[_gi].mod_name), "%s", mod_name);
+            g_crash_guard_arr[_gi].pid          = pid;
+            g_crash_guard_arr[_gi].enabled_at_ms = now_ms();
+          }
+        }
         pthread_mutex_unlock(&g_crash_guard_lock);
         g_post_apply_guard_until_ms = now_ms() + (uint64_t)watch_ms;
         cr_log("info", "cheats.guard",
@@ -933,10 +1477,14 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
       }
     } else {
       pthread_mutex_lock(&g_crash_guard_lock);
-      if (strcmp(g_crash_guard.title_id, title_id) == 0 && g_crash_guard.mod_index == mod_index) {
-        memset(&g_crash_guard, 0, sizeof(g_crash_guard));
-        g_post_apply_guard_until_ms = 0;
+      for (int _k = g_crash_guard_n - 1; _k >= 0; _k--) {
+        if (strcmp(g_crash_guard_arr[_k].title_id, title_id) == 0 &&
+            g_crash_guard_arr[_k].mod_index == mod_index) {
+          g_crash_guard_arr[_k] = g_crash_guard_arr[--g_crash_guard_n];
+          break;
+        }
       }
+      if (g_crash_guard_n == 0) g_post_apply_guard_until_ms = 0;
       pthread_mutex_unlock(&g_crash_guard_lock);
     }
   }

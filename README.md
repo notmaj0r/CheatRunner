@@ -8,6 +8,7 @@ It provides a local web dashboard to:
 - launch installed titles from a browser;
 - load local cheat files from the PS5 filesystem;
 - use `.mc4`, `.shn`, and `.json` trainers;
+- auto-apply local PS-Game-Patch XML patches when a game starts;
 - optionally download cheat files from configured cheat sources;
 - enable/disable supported cheats from your browser;
 - inspect logs, diagnostics, and cheat debug information.
@@ -61,6 +62,7 @@ Runtime cheat memory writes can crash the game, break a session, corrupt your sa
 - Launch installed games/apps from the browser.
 - Local cheat loading from `/data/cheatrunner/cheats`.
 - `.mc4`, `.shn`, and `.json` cheat/trainer support.
+- PS-Game-Patch XML auto-patch support.
 - Optional remote cheat downloads from configured cheat sources.
 - ON/OFF trainer toggles where supported.
 - Runtime restore where possible.
@@ -146,6 +148,30 @@ CheatRunner will try to match cheats by title ID and version when possible.
 
 ---
 
+## 📁 Local Patches
+
+CheatRunner can auto-apply PS-Game-Patch style XML patches when a matching game starts.
+
+Default paths:
+
+```text
+/data/cheatrunner/patches
+/data/elf-arsenal/patches
+```
+
+Recommended folders:
+
+```text
+/data/cheatrunner/patches/xml
+/data/cheatrunner/patches/json
+/data/cheatrunner/patches/shn
+/data/cheatrunner/patches/mc4
+```
+
+CheatRunner matches patches by title ID, honors `AppVer` when present, converts `ImageBase` patch addresses to runtime-relative offsets, and pauses kstuff before memory writes when kstuff runtime control is available.
+
+---
+
 ## 🌐 Remote Cheat Sources
 
 CheatRunner can optionally download cheat files from configured cheat repositories.
@@ -158,7 +184,7 @@ The main local cheat path remains:
 /data/cheatrunner/cheats
 ```
 
-Remote XML game patches are **not included in v0.1**.
+Remote XML game patch downloads are not bundled. Use local patch files under `/data/cheatrunner/patches` or `/data/elf-arsenal/patches`.
 
 ---
 
@@ -211,8 +237,6 @@ build/CheatRunner.elf
 
 The following features were removed from the v0.1 stabilization pass and may return in a future release:
 
-- XML game patches;
-- PS-Game-Patch integration;
 - controller hotkeys / ScePad monitor.
 
 They were removed to keep the first stable CheatRunner release focused on games, launching, local/remote cheats, and trainer stability.

@@ -26,8 +26,11 @@ launch_status_state_t g_launch_status = {
     .rc = 0,
     .verified = 0,
     .hex = "0x00000000",
+    .started_ms = 0,
+    .updated_ms = 0,
+    .generation = 0,
 };
-volatile uint64_t g_last_launch_verified_at_ms = 0;
+uint64_t g_last_launch_verified_at_ms = 0;
 
 static int wait_until_title_running(const char *title_id, int timeout_ms);
 static int
@@ -51,8 +54,8 @@ lncutil_initialize_once(void) {
 }
 
 static int
-launch_rc_is_async_verifiable(int rc) {
-  return rc == 0 || (uint32_t)rc == 0x80940005u;
+launch_rc_is_submitted_or_verifiable(int rc) {
+  return rc >= 0 || (uint32_t)rc == 0x80940005u;
 }
 
 static int
@@ -70,7 +73,7 @@ launch_title_with_lncutil(const char *title_id, app_launch_ctx_t *ctx, int has_c
     } else {
       cr_log("warn", "launch", "sceLncUtilLaunchApp failed %s with ctx rc=%d (0x%08X)", title_id, rc, (uint32_t)rc);
     }
-    if (rc >= 0 || launch_rc_is_async_verifiable(rc)) {
+    if (rc >= 0 || launch_rc_is_submitted_or_verifiable(rc)) {
       return rc;
     }
   }
@@ -103,7 +106,7 @@ launch_title_with_systemservice(const char *title_id, app_launch_ctx_t *ctx, int
     } else {
       cr_log("warn", "launch", "sceSystemServiceLaunchApp failed %s with ctx rc=%d (0x%08X)", title_id, rc, (uint32_t)rc);
     }
-    if (rc >= 0 || launch_rc_is_async_verifiable(rc)) {
+    if (rc >= 0 || launch_rc_is_submitted_or_verifiable(rc)) {
       return rc;
     }
   }
@@ -119,8 +122,8 @@ launch_title_with_systemservice(const char *title_id, app_launch_ctx_t *ctx, int
 }
 
 static int
-launch_title(const char *title_id, const char *args, const char **method_out, int *rc_out, int *verified_out,
-             int *fguser_out, char *msg_out, size_t msg_out_size) {
+launch_title(uint64_t gen, const char *title_id, const char *args, const char **method_out, int *rc_out,
+             int *verified_out, int *fguser_out, char *msg_out, size_t msg_out_size) {
   app_launch_ctx_t ctx;
   uint32_t user_id = 0xFFFFFFFFu;
   int has_ctx = 0;
@@ -239,8 +242,8 @@ launch_title(const char *title_id, const char *args, const char **method_out, in
   if (method_out) {
     *method_out = "sceLncUtilLaunchApp";
   }
-  if (launch_rc_is_async_verifiable(lnc_rc)) {
-    set_launch_status_ex(1, "verifying_lnc", title_id, "Verifying launch...", 0, "sceLncUtilLaunchApp", lnc_rc, 0);
+  if (launch_rc_is_submitted_or_verifiable(lnc_rc)) {
+    set_launch_status_ex_gen(gen, 1, "verifying_lnc", title_id, "Verifying launch...", 0, "sceLncUtilLaunchApp", lnc_rc, 0);
     // 0x80940005 on the LncUtil path: cap the wait to 5s so we fall through to
     // SystemService quickly when the title never appears. rc==0 (clean submit)
     // still uses the full verify_timeout.
@@ -270,7 +273,7 @@ launch_title(const char *title_id, const char *args, const char **method_out, in
     }
   }
 
-  set_launch_status_ex(1, "launching_system", title_id, "Trying SystemService launch...", 0, "sceSystemServiceLaunchApp", 0, 0);
+  set_launch_status_ex_gen(gen, 1, "launching_system", title_id, "Trying SystemService launch...", 0, "sceSystemServiceLaunchApp", 0, 0);
   sys_rc = launch_title_with_systemservice(title_id, &ctx, has_ctx, argc > 0 ? argv_ptrs : NULL);
   if (rc_out) {
     *rc_out = sys_rc;
@@ -278,8 +281,8 @@ launch_title(const char *title_id, const char *args, const char **method_out, in
   if (method_out) {
     *method_out = "sceSystemServiceLaunchApp";
   }
-  if (launch_rc_is_async_verifiable(sys_rc)) {
-    set_launch_status_ex(1, "verifying_system", title_id, "Verifying launch...", 0, "sceSystemServiceLaunchApp", sys_rc, 0);
+  if (launch_rc_is_submitted_or_verifiable(sys_rc)) {
+    set_launch_status_ex_gen(gen, 1, "verifying_system", title_id, "Verifying launch...", 0, "sceSystemServiceLaunchApp", sys_rc, 0);
     int sys_verify_ms = ((uint32_t)sys_rc == 0x80940005u)
                         ? (verify_timeout < 5000 ? verify_timeout : 5000)
                         : verify_timeout;
@@ -387,6 +390,7 @@ set_launch_status_locked(int busy, const char *phase, const char *title_id, cons
   g_launch_status.rc = rc;
   g_launch_status.verified = verified ? 1 : 0;
   snprintf(g_launch_status.hex, sizeof(g_launch_status.hex), "0x%08X", (uint32_t)rc);
+  g_launch_status.updated_ms = now_ms();
 }
 
 void
@@ -403,6 +407,77 @@ set_launch_status_ex(int busy, const char *phase, const char *title_id, const ch
   pthread_mutex_lock(&g_launch_status_lock);
   set_launch_status_locked(busy, phase, title_id, message, last_ok, method, rc, verified);
   pthread_mutex_unlock(&g_launch_status_lock);
+}
+
+void
+launch_begin_ex(const char *title_id, uint64_t *gen_out) {
+  pthread_mutex_lock(&g_launch_status_lock);
+  g_launch_status.generation++;
+  g_launch_status.started_ms = now_ms();
+  set_launch_status_locked(1, "killing_current", title_id, "Queued", 0, "", 0, 0);
+  if (gen_out) *gen_out = g_launch_status.generation;
+  pthread_mutex_unlock(&g_launch_status_lock);
+}
+
+void
+set_launch_status_ex_gen(uint64_t gen, int busy, const char *phase, const char *title_id,
+                         const char *message, int last_ok, const char *method, int rc, int verified) {
+  pthread_mutex_lock(&g_launch_status_lock);
+  if (g_launch_status.generation == gen) {
+    set_launch_status_locked(busy, phase, title_id, message, last_ok, method, rc, verified);
+  }
+  pthread_mutex_unlock(&g_launch_status_lock);
+}
+
+int
+launch_status_recover_stale(void) {
+  int threshold_ms;
+  pthread_mutex_lock(&g_cfg_lock);
+  threshold_ms = g_cfg.launch_wait_timeout_ms + g_cfg.launch_post_timeout_grace_ms + 15000;
+  pthread_mutex_unlock(&g_cfg_lock);
+  if (threshold_ms < 45000) threshold_ms = 45000;
+  if (threshold_ms > 120000) threshold_ms = 120000;
+
+  pthread_mutex_lock(&g_launch_status_lock);
+  if (!g_launch_status.busy || g_launch_status.started_ms == 0) {
+    pthread_mutex_unlock(&g_launch_status_lock);
+    return 0;
+  }
+  uint64_t age = now_ms() - g_launch_status.started_ms;
+  if (age <= (uint64_t)threshold_ms) {
+    pthread_mutex_unlock(&g_launch_status_lock);
+    return 0;
+  }
+  char title_id[16];
+  char method[40];
+  int saved_rc = g_launch_status.rc;
+  uint64_t saved_gen = g_launch_status.generation;
+  snprintf(title_id, sizeof(title_id), "%s", g_launch_status.title_id);
+  snprintf(method, sizeof(method), "%s", g_launch_status.method);
+  pthread_mutex_unlock(&g_launch_status_lock);
+
+  running_game_state_t gm;
+  running_state_get(&gm);
+
+  pthread_mutex_lock(&g_launch_status_lock);
+  /* Abort if busy cleared or a new launch started while we were checking game state */
+  if (!g_launch_status.busy || g_launch_status.generation != saved_gen) {
+    pthread_mutex_unlock(&g_launch_status_lock);
+    return 0;
+  }
+  if (gm.running && strcmp(gm.title_id, title_id) == 0) {
+    set_launch_status_locked(0, "ready", title_id,
+                             "Game is running; recovered stale launch status", 1, method, saved_rc, 1);
+    cr_log("info", "launch.watchdog",
+           "recovered stale launch busy title=%s age=%llums -> ready", title_id, (unsigned long long)age);
+  } else {
+    set_launch_status_locked(0, "timeout", title_id,
+                             "Launch timed out; recovered from stale busy state", 0, method, saved_rc, 0);
+    cr_log("warn", "launch.watchdog",
+           "recovered stale launch busy title=%s age=%llums -> timeout", title_id, (unsigned long long)age);
+  }
+  pthread_mutex_unlock(&g_launch_status_lock);
+  return 1;
 }
 
 static int
@@ -462,60 +537,83 @@ launch_worker_thread(void *arg) {
   launch_worker_request_t req = *(launch_worker_request_t *)arg;
   free(arg);
 
-  set_launch_status_ex(1, "killing_current", req.title_id, "Closing current game...", 0, "", 0, 0);
+  uint64_t my_gen = req.generation;
+  set_launch_status_ex_gen(my_gen, 1, "killing_current", req.title_id, "Closing current game...", 0, "", 0, 0);
   cr_log("info", "launch", "request title=%s args=\"%s\"", req.title_id, req.args[0] ? req.args : "");
-  /* Resolve user context before killing current game so we can abort cleanly */
+  /* Preflight: if target is already running per game monitor, skip relaunch entirely */
   {
-    char uid_cfg[32] = "auto";
-    pthread_mutex_lock(&g_cfg_lock);
-    snprintf(uid_cfg, sizeof(uid_cfg), "%s", g_cfg.launch_user_id);
-    pthread_mutex_unlock(&g_cfg_lock);
-    if (strcasecmp(uid_cfg, "auto") == 0 || uid_cfg[0] == '\0') {
-      uint32_t fguser = 0xFFFFFFFFu;
-      if (sceUserServiceGetForegroundUser(&fguser) != 0 || fguser == 0xFFFFFFFFu || (int32_t)fguser == -1) {
-        cr_log("warn", "launch", "auto user context: no foreground user (id=0x%08X); will attempt without user context", fguser);
-      }
+    running_game_state_t cur;
+    running_state_get(&cur);
+    if (cur.running && strcmp(cur.title_id, req.title_id) == 0) {
+      __atomic_store_n(&g_last_launch_verified_at_ms, now_ms(), __ATOMIC_RELEASE);
+      set_launch_status_ex_gen(my_gen, 0, "ready", req.title_id, "Game is already running", 1, "already_running", 0, 1);
+      notification_add("launch", "Game already running: %s", req.title_id);
+      cr_log("info", "launch", "game already running %s; skipping relaunch", req.title_id);
+      return NULL;
     }
   }
-  if (g_cfg.launch_kill_current) {
+  /* Snapshot all config fields used in this thread under a single lock acquisition */
+  char uid_cfg[32] = "auto";
+  int cfg_kill_current;
+  int cfg_wait_timeout_ms;
+  int cfg_kill_delay_ms;
+  {
+    pthread_mutex_lock(&g_cfg_lock);
+    snprintf(uid_cfg, sizeof(uid_cfg), "%s", g_cfg.launch_user_id);
+    cfg_kill_current    = g_cfg.launch_kill_current;
+    cfg_wait_timeout_ms = g_cfg.launch_wait_timeout_ms;
+    cfg_kill_delay_ms   = g_cfg.launch_kill_delay_ms;
+    pthread_mutex_unlock(&g_cfg_lock);
+  }
+  /* Resolve user context before killing current game so we can abort cleanly */
+  if (strcasecmp(uid_cfg, "auto") == 0 || uid_cfg[0] == '\0') {
+    uint32_t fguser = 0xFFFFFFFFu;
+    if (sceUserServiceGetForegroundUser(&fguser) != 0 || fguser == 0xFFFFFFFFu || (int32_t)fguser == -1) {
+      cr_log("warn", "launch", "auto user context: no foreground user (id=0x%08X); will attempt without user context", fguser);
+    }
+  }
+  if (cfg_kill_current) {
     int app_id = sceSystemServiceGetAppIdOfRunningBigApp();
     cr_log("info", "launch", "current bigapp appId=0x%X", app_id > 0 ? app_id : 0);
     if (app_id > 0) {
       sceSystemServiceKillApp(app_id, -1, 0, 0);
-      set_launch_status_ex(1, "waiting_for_close", req.title_id, "Waiting current game close...", 0, "", 0, 0);
-      if (wait_until_no_bigapp(g_cfg.launch_wait_timeout_ms) != 0) {
-        set_launch_status_ex(0, "failed", req.title_id, "Timeout waiting game close", 0, "", -1, 0);
+      set_launch_status_ex_gen(my_gen, 1, "waiting_for_close", req.title_id, "Waiting current game close...", 0, "", 0, 0);
+      if (wait_until_no_bigapp(cfg_wait_timeout_ms) != 0) {
+        set_launch_status_ex_gen(my_gen, 0, "failed", req.title_id, "Timeout waiting game close", 0, "", -1, 0);
         notification_add("launch_fail", "Launch failed for %s (close timeout)", req.title_id);
         cr_log("error", "launch", "close timeout for %s", req.title_id);
         return NULL;
       }
-      if (g_cfg.launch_kill_delay_ms > 0) {
-        usleep((useconds_t)g_cfg.launch_kill_delay_ms * 1000);
+      if (cfg_kill_delay_ms > 0) {
+        usleep((useconds_t)cfg_kill_delay_ms * 1000);
       }
     }
   }
 
-  set_launch_status_ex(1, "launching_lnc", req.title_id, "Trying LNC launch...", 0, "sceLncUtilLaunchApp", 0, 0);
+  set_launch_status_ex_gen(my_gen, 1, "launching_lnc", req.title_id, "Trying LNC launch...", 0, "sceLncUtilLaunchApp", 0, 0);
   const char *method = "";
   int method_rc = 0;
   int verified = 0;
   int fguser_valid = 0;
   char launch_msg[160] = {0};
-  int rc = launch_title(req.title_id, req.args[0] ? req.args : NULL, &method, &method_rc, &verified, &fguser_valid,
+  int rc = launch_title(my_gen, req.title_id, req.args[0] ? req.args : NULL, &method, &method_rc, &verified, &fguser_valid,
                         launch_msg, sizeof(launch_msg));
   pthread_mutex_lock(&g_launch_status_lock);
-  g_launch_status.foreground_user_valid = fguser_valid;
+  if (g_launch_status.generation == my_gen) {
+    g_launch_status.foreground_user_valid = fguser_valid;
+  }
   pthread_mutex_unlock(&g_launch_status_lock);
   if (rc != 0) {
-    set_launch_status_ex(0, "failed", req.title_id,
-                         launch_msg[0] ? launch_msg : "Launch syscall failed", 0, method, method_rc, verified);
+    set_launch_status_ex_gen(my_gen, 0, "failed", req.title_id,
+                             launch_msg[0] ? launch_msg : "Launch syscall failed", 0, method, method_rc, verified);
     notification_add("launch_fail", "Launch failed for %s (rc=%d)", req.title_id, rc);
     cr_log("error", "launch", "launch syscall failed %s rc=%d (0x%08X)", req.title_id, rc, (uint32_t)rc);
     return NULL;
   }
 
-  g_last_launch_verified_at_ms = now_ms();
-  set_launch_status_ex(0, "ready", req.title_id, launch_msg[0] ? launch_msg : "Game is running", 1, method, method_rc, verified);
+  __atomic_store_n(&g_last_launch_verified_at_ms, now_ms(), __ATOMIC_RELEASE);
+  set_launch_status_ex_gen(my_gen, 0, "ready", req.title_id,
+                           launch_msg[0] ? launch_msg : "Game is running", 1, method, method_rc, verified);
   notification_add("launch", "Game launched: %s", req.title_id);
   cr_log("info", "launch", "game launched %s method=%s rc=%d (0x%08X) verified=%d", req.title_id,
          method ? method : "", method_rc, (uint32_t)method_rc, verified);

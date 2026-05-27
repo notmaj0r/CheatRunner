@@ -53,6 +53,8 @@ void handle_api_cheats_download(int fd, const char *query);
 void handle_api_cheats_scan(int fd, const char *query);
 void handle_api_cheats_mc4_debug(int fd, const char *query);
 void handle_api_cheats_clear_crash_flags(int fd, const char *query);
+void handle_api_cheats_select(int fd, const char *query);
+void handle_api_cheats_select_auto(int fd, const char *query);
 void handle_api_cheats_upload(int fd, const char *query, const char *body, size_t body_len);
 void handle_api_cheats_download_all(int fd);
 void handle_api_cheats_download_all_status(int fd);

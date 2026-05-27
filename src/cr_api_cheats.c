@@ -67,6 +67,15 @@ cr_api_cheats_handle(int fd, const char *method, const char *path,
     handle_api_cheats_download_all_status(fd);
     return 1;
   }
+  /* /api/cheats/repo/download?source=<hencollection|ps5cheats|goldhen|all>&overwrite=0|1 */
+  if (!strcmp(path, "/api/cheats/repo/download")) {
+    handle_api_cheats_repo_download(fd, query);
+    return 1;
+  }
+  if (!strcmp(path, "/api/cheats/repo/download/status")) {
+    handle_api_cheats_repo_download_status(fd);
+    return 1;
+  }
   if (!strcmp(path, "/api/cheats/raw")) {
     handle_api_cheats_raw(fd, query);
     return 1;
@@ -101,6 +110,22 @@ cr_api_cheats_handle(int fd, const char *method, const char *path,
   }
   if (!strcmp(path, "/api/cheats/clear-crash-flags")) {
     handle_api_cheats_clear_crash_flags(fd, query);
+    return 1;
+  }
+  if (!strcmp(path, "/api/cheats/select")) {
+    if (!is_post) {
+      http_send_json(fd, 405, "{\"ok\":false,\"error\":\"method_not_allowed\",\"message\":\"Use POST.\"}");
+      return 1;
+    }
+    handle_api_cheats_select(fd, query);
+    return 1;
+  }
+  if (!strcmp(path, "/api/cheats/select/auto")) {
+    if (!is_post) {
+      http_send_json(fd, 405, "{\"ok\":false,\"error\":\"method_not_allowed\",\"message\":\"Use POST.\"}");
+      return 1;
+    }
+    handle_api_cheats_select_auto(fd, query);
     return 1;
   }
   return 0;

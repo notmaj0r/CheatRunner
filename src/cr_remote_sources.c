@@ -11,6 +11,7 @@
 #include "cr_config.h"
 #include "cr_titles.h"
 #include "cr_cheat_formats.h"
+#include "cr_version.h"
 #include "cr_remote_sources.h"
 static void
 source_make_slug(const char *name, char *out, size_t out_size) {
@@ -66,9 +67,13 @@ source_model_defaults(source_config_model_t *m) {
     return;
   }
   memset(m, 0, sizeof(*m));
-  m->cheat_count = 1;
   source_set(&m->cheat_sources[0], "HEN-Cheats-Collection", "github", "TeeKay87",
              "HEN-Cheats-Collection", "master", "cheats", 1);
+  source_set(&m->cheat_sources[1], "PS5-Cheats", "github", "etaHEN",
+             "PS5_Cheats", "main", "", 1);
+  source_set(&m->cheat_sources[2], "GoldHEN-Cheats", "github", "GoldHEN",
+             "GoldHEN_Cheat_Repository", "main", "", 1);
+  m->cheat_count = 3;
 }
 
 static int
@@ -915,16 +920,8 @@ extract_version_from_filename(const char *filename, char *out, size_t out_size) 
 int
 cheat_remote_match_score(const char *want_version, const char *cand_version) {
   if (want_version && want_version[0] && cand_version && cand_version[0]) {
-    if (strcmp(want_version, cand_version) == 0) {
+    if (cr_version_equal_known(want_version, cand_version)) {
       return 300;
-    }
-    int wa = 0, wb = 0, wc = 0;
-    int ca = 0, cb = 0, cc = 0;
-    if (parse_version_triplet(want_version, &wa, &wb, &wc) &&
-        parse_version_triplet(cand_version, &ca, &cb, &cc)) {
-      if (wa == ca && wb == cb) {
-        return 220;
-      }
     }
   }
   return 150;

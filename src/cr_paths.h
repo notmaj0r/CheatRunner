@@ -9,6 +9,8 @@
 #define CHEATRUNNER_CHEATS_JSON_DIR   "/data/cheatrunner/cheats/json"
 #define CHEATRUNNER_CHEATS_SHN_DIR    "/data/cheatrunner/cheats/shn"
 #define CHEATRUNNER_CHEATS_MC4_DIR    "/data/cheatrunner/cheats/mc4"
+#define ETAHEN_CHEATS_DIR             "/data/etaHEN/cheats"
+#define ELF_ARSENAL_CHEATS_DIR        "/data/elf-arsenal/cheats"
 #define CHEATRUNNER_CACHE_DIR         "/data/cheatrunner/cache"
 #define CHEATRUNNER_CACHE_ICON_DIR    "/data/cheatrunner/cache/icons"
 #define CHEATRUNNER_CACHE_PIC0_DIR    "/data/cheatrunner/cache/pic0"

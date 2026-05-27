@@ -143,7 +143,7 @@ if (-not $Clean -and (Test-Path $ninjaFile)) {
   $ninjaContent = Get-Content -LiteralPath $ninjaFile -Raw -ErrorAction SilentlyContinue
   if ($ninjaContent) {
     # Files that must never appear in a clean build (removed subsystems)
-    $removedSources = @('cr_hotkey.c', 'cr_patches.c', 'cr_api_patches.c', 'cr_scepad_compat.h')
+    $removedSources = @('cr_hotkey.c', 'cr_scepad_compat.h')
     $staleRemoved = $removedSources | Where-Object { $ninjaContent -match [regex]::Escape($_) }
     if ($staleRemoved) {
       $names = $staleRemoved -join ', '
@@ -208,9 +208,7 @@ $configureArgs = @(
   "-DCMAKE_MAKE_PROGRAM=$ninjaPath"
 )
 
-if ($enableSqlite) {
-  $configureArgs += "-DCHEATRUNNER_SQLITE_BUNDLED=ON"
-}
+$configureArgs += ("-DCHEATRUNNER_SQLITE_BUNDLED=" + $(if ($enableSqlite) { "ON" } else { "OFF" }))
 
 if (Test-Path $cacheFile) {
   $cacheLine = Select-String -Path $cacheFile -Pattern "^CMAKE_TOOLCHAIN_FILE:FILEPATH=" -ErrorAction SilentlyContinue
@@ -252,13 +250,9 @@ if (Test-Path $elfPath) {
 
   # --- Post-build ELF string sanity check (FAIL on banned strings from removed subsystems) ---
   $bannedStrings = @(
-    '/api/patches',
     'ScePad support compiled',
     'pad open',
     'cr_hotkey',
-    'cr_patches',
-    'patches/xml',
-    'PS-Game-Patch',
     'illusionyy'
   )
   $elfText = [System.IO.File]::ReadAllText($elfPath, [System.Text.Encoding]::GetEncoding(28591))

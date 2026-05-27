@@ -84,26 +84,31 @@ fmt_hex16(const uint8_t *b, size_t len, char *buf, size_t buf_sz) {
 }
 
 int
-write_process_memory(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) {
+write_process_memory_ex(pid_t pid, intptr_t addr, const uint8_t *data, size_t len,
+                         int *orig_prot_out) {
   intptr_t page = (intptr_t)ROUND_PG_DOWN((uintptr_t)addr);
   size_t span = (size_t)(ROUND_PG_UP((uintptr_t)addr + len) - (uintptr_t)page);
 
   int orig_prot = kernel_get_vmem_protection(pid, page, span);
-  if (orig_prot < 0) orig_prot = PROT_READ | PROT_EXEC;
+  if (orig_prot < 0) {
+    cr_log("warn", "cheats.mem", "get_vmem_protection failed page=0x%lx span=0x%zx rc=%d — aborting write",
+           (long)page, span, orig_prot);
+    if (orig_prot_out) *orig_prot_out = -1;
+    return -5;
+  }
+  if (orig_prot_out) *orig_prot_out = orig_prot;
 
   int mrc = kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
-  cr_log("info", "cheats.mem", "mprotect_rwx page=0x%lx span=0x%zx orig_prot=%d rc=%d",
+  cr_log("debug", "cheats.mem", "mprotect_rwx page=0x%lx span=0x%zx orig_prot=%d rc=%d",
          (long)page, span, orig_prot, mrc);
   if (mrc != 0) return -4;
 
   int wrc = pt_copyin(pid, data, addr, len);
-  cr_log("info", "cheats.mem", "copyin addr=0x%lx len=%zu rc=%d", (long)addr, len, wrc);
+  cr_log("debug", "cheats.mem", "copyin addr=0x%lx len=%zu rc=%d", (long)addr, len, wrc);
   if (wrc < 0) {
     kernel_mprotect(pid, page, span, orig_prot);
     return -1;
   }
-
-  kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
 
   uint8_t vbuf[256];
   size_t off = 0;
@@ -129,7 +134,120 @@ write_process_memory(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) 
     off += chunk;
   }
 
-  cr_log("info", "cheats.mem", "int_verify ok addr=0x%lx len=%zu page_rwx", (long)addr, len);
+  /* Restore original page protection — never leave RWX after a successful write. */
+  kernel_mprotect(pid, page, span, orig_prot);
+  cr_log("debug", "cheats.mem", "int_verify ok addr=0x%lx len=%zu prot_restored=%d", (long)addr, len, orig_prot);
+  return 0;
+}
+
+int
+write_process_memory(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) {
+  return write_process_memory_ex(pid, addr, data, len, NULL);
+}
+
+intptr_t
+cheat_resolve_write_addr_ex(pid_t pid, intptr_t base, uint64_t off_u,
+                             int abs_flag, int is_non_json, int auto_detect,
+                             const uint8_t *on_b, size_t byte_len,
+                             const uint8_t *expect_b, int expected_reliable,
+                             cr_addr_fallback_policy_t fallback_policy,
+                             cr_addr_resolve_status_t *resolve_status,
+                             int silent) {
+  if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_OK_VERIFIED;
+  intptr_t abs_addr = (intptr_t)off_u;
+  intptr_t rel_addr = base + (intptr_t)off_u;
+
+  /* JSON or explicit absolute flag: address is determined without heuristics. */
+  if (!is_non_json || abs_flag) {
+    return abs_flag ? abs_addr : rel_addr;
+  }
+
+  /* Non-JSON without reliable expected bytes: apply fallback policy directly.
+   * This must come BEFORE the auto_detect guard — the fallback policy requires no probing. */
+  if (!expected_reliable) {
+    intptr_t fallback;
+    cr_addr_resolve_status_t st;
+    const char *mode_str;
+    switch (fallback_policy) {
+      case CR_ADDR_FALLBACK_BLOCK:
+        if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_BLOCKED_NO_BASELINE;
+        if (!silent)
+          cr_log("warn", "cheats.mem",
+                 "addr_blocked_no_baseline off=0x%llx base=0x%lx abs=0x%lx rel=0x%lx policy=block",
+                 (unsigned long long)off_u, (long)base, (long)abs_addr, (long)rel_addr);
+        return 0;
+      case CR_ADDR_FALLBACK_ABSOLUTE:
+        fallback = abs_addr;
+        st       = CR_ADDR_RESOLVE_OK_UNVERIFIED_ABSOLUTE;
+        mode_str = "absolute";
+        break;
+      case CR_ADDR_FALLBACK_LEGACY:
+        /* Legacy magnitude heuristic: large offsets treated as PS5 absolute addresses.
+         * This is wrong for most MC4/SHN files — use "relative" instead (see config). */
+        fallback = (off_u >= 0x200000ULL) ? abs_addr : rel_addr;
+        st       = CR_ADDR_RESOLVE_OK_UNVERIFIED_LEGACY;
+        mode_str = "legacy_magnitude_heuristic";
+        break;
+      case CR_ADDR_FALLBACK_RELATIVE:
+      default:
+        fallback = rel_addr;
+        st       = CR_ADDR_RESOLVE_OK_UNVERIFIED_RELATIVE;
+        mode_str = "relative";
+        break;
+    }
+    if (resolve_status) *resolve_status = st;
+    if (!silent)
+      cr_log("info", "cheats.mem",
+             "addr_unverified_%s off=0x%llx base=0x%lx abs=0x%lx rel=0x%lx using=0x%lx reason=no_reliable_expected policy=%s",
+             mode_str, (unsigned long long)off_u, (long)base, (long)abs_addr, (long)rel_addr, (long)fallback, mode_str);
+    return fallback;
+  }
+
+  /* Reliable expected bytes available — probe both candidates to pick the right one. */
+  if (!auto_detect || off_u < 0x200000ULL || pid <= 0 || byte_len == 0 || byte_len > 128) {
+    return rel_addr;
+  }
+
+  /* Probe both candidates. */
+  uint8_t probe[128];
+  int abs_match = 0, rel_match = 0;
+
+  if (read_process_memory(pid, abs_addr, probe, byte_len) == 0) {
+    if (memcmp(probe, on_b, byte_len) == 0 ||
+        (expect_b && memcmp(probe, expect_b, byte_len) == 0)) {
+      abs_match = 1;
+    }
+  }
+  if (read_process_memory(pid, rel_addr, probe, byte_len) == 0) {
+    if (memcmp(probe, on_b, byte_len) == 0 ||
+        (expect_b && memcmp(probe, expect_b, byte_len) == 0)) {
+      rel_match = 1;
+    }
+  }
+
+  if (abs_match && rel_match) {
+    if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_AMBIGUOUS;
+    if (!silent)
+      cr_log("warn", "cheats.mem",
+             "addr_ambiguous off=0x%llx abs=0x%lx rel=0x%lx both matched; preferring relative",
+             (unsigned long long)off_u, (long)abs_addr, (long)rel_addr);
+    return rel_addr;
+  }
+  if (abs_match) {
+    if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_OK_VERIFIED;
+    return abs_addr;
+  }
+  if (rel_match) {
+    if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_OK_VERIFIED;
+    return rel_addr;
+  }
+
+  /* Reliable expected provided but neither candidate matched — true unresolved. */
+  if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_UNRESOLVED;
+  if (!silent)
+    cr_log("warn", "cheats.mem",
+           "addr_unresolved off=0x%llx abs=0x%lx rel=0x%lx neither matched expected bytes",
+           (unsigned long long)off_u, (long)abs_addr, (long)rel_addr);
   return 0;
 }
 
@@ -137,29 +255,14 @@ intptr_t
 cheat_resolve_write_addr(pid_t pid, intptr_t base, uint64_t off_u,
                          int abs_flag, int is_non_json, int auto_detect,
                          const uint8_t *on_b, size_t byte_len,
-                         const uint8_t *expect_b) {
-  intptr_t abs_addr = (intptr_t)off_u;
-  intptr_t rel_addr = base + (intptr_t)off_u;
-
-  if (!is_non_json || abs_flag) {
-    return abs_flag ? abs_addr : rel_addr;
-  }
-  if (!auto_detect || off_u < 0x200000ULL || pid <= 0 || byte_len == 0 || byte_len > 128) {
-    return rel_addr;
-  }
-
-  uint8_t probe[128];
-  if (read_process_memory(pid, abs_addr, probe, byte_len) == 0) {
-    if (memcmp(probe, on_b, byte_len) == 0 || (expect_b && memcmp(probe, expect_b, byte_len) == 0)) {
-      return abs_addr;
-    }
-  }
-  if (read_process_memory(pid, rel_addr, probe, byte_len) == 0) {
-    if (memcmp(probe, on_b, byte_len) == 0 || (expect_b && memcmp(probe, expect_b, byte_len) == 0)) {
-      return rel_addr;
-    }
-  }
-  return abs_addr;
+                         const uint8_t *expect_b,
+                         cr_addr_resolve_status_t *resolve_status) {
+  int expected_reliable = (expect_b != NULL) ? 1 : 0;
+  /* Callers that pass NULL resolve_status are scan/validate contexts — suppress logs. */
+  int silent = (resolve_status == NULL) ? 1 : 0;
+  return cheat_resolve_write_addr_ex(pid, base, off_u, abs_flag, is_non_json, auto_detect,
+                                     on_b, byte_len, expect_b, expected_reliable,
+                                     CR_ADDR_FALLBACK_BLOCK, resolve_status, silent);
 }
 
 void
@@ -202,6 +305,17 @@ int
 process_is_ps2_emu(pid_t pid) {
   uint32_t handle = 0;
   return kernel_dynlib_handle(pid, "libScePs2EmuMenuDialog.sprx", &handle) == 0;
+}
+
+int
+write_process_memory_forced(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) {
+  intptr_t page = (intptr_t)ROUND_PG_DOWN((uintptr_t)addr);
+  size_t   span = (size_t)(ROUND_PG_UP((uintptr_t)addr + len) - (uintptr_t)page);
+  if (kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+    return -4;
+  int wrc = pt_copyin(pid, data, addr, len);
+  kernel_mprotect(pid, page, span, PROT_READ | PROT_EXEC);
+  return (wrc < 0) ? -1 : 0;
 }
 
 int

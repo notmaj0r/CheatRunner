@@ -259,8 +259,8 @@ sfo_read_value_for_key(const char *path, const char *param_key, char *out, size_
     keys[0] = "APP_VER";
     keys[1] = "VERSION";
   } else if (!strcmp(param_key, "contentVersion")) {
-    keys[0] = "VERSION";
-    keys[1] = "APP_VER";
+    keys[0] = "APP_VER";  /* game version; VERSION is often SFO schema version */
+    keys[1] = "VERSION";
   } else {
     keys[0] = param_key;
   }
@@ -288,6 +288,12 @@ read_param_json_value(const char *json, const char *key, char *out, size_t out_s
       ok = cjson_copy_string(v, out, out_size);
       if (!ok) {
         ok = cjson_find_string_recursive(root, key, out, out_size, 0);
+      }
+      /* PS5 param.json stores game version as "applicationVersion" */
+      if (!ok && (!strcmp(key, "contentVersion") || !strcmp(key, "appVersion"))) {
+        cJSON *av = cJSON_GetObjectItemCaseSensitive(root, "applicationVersion");
+        ok = cjson_copy_string(av, out, out_size);
+        if (!ok) ok = cjson_find_string_recursive(root, "applicationVersion", out, out_size, 0);
       }
     }
     cJSON_Delete(root);
@@ -351,16 +357,24 @@ read_param_value_by_title_id(const char *title_id, const char *key, char *out, s
       NULL,
   };
   const char *sfo_candidates[] = {
+      "/user/patch/%s/sce_sys/param.sfo",           /* patch/update before base app */
       "/user/appmeta/%s/param.sfo",
       "/user/appmeta/%s/sce_sys/param.sfo",
       "/user/appmeta/external/%s/param.sfo",
       "/user/appmeta/external/%s/sce_sys/param.sfo",
       "/user/app/%s/sce_sys/param.sfo",
-      "/user/patch/%s/sce_sys/param.sfo",
-      "/mnt/ext0/user/app/%s/sce_sys/param.sfo",
-      "/mnt/ext1/user/app/%s/sce_sys/param.sfo",
       "/mnt/ext0/user/patch/%s/sce_sys/param.sfo",
       "/mnt/ext1/user/patch/%s/sce_sys/param.sfo",
+      "/mnt/ext0/user/app/%s/sce_sys/param.sfo",
+      "/mnt/ext1/user/app/%s/sce_sys/param.sfo",
+      "/mnt/ext0/user/appmeta/%s/param.sfo",
+      "/mnt/ext1/user/appmeta/%s/param.sfo",
+      "/mnt/ext0/user/appmeta/%s/sce_sys/param.sfo",
+      "/mnt/ext1/user/appmeta/%s/sce_sys/param.sfo",
+      "/mnt/ext0/user/appmeta/external/%s/param.sfo",
+      "/mnt/ext1/user/appmeta/external/%s/param.sfo",
+      "/mnt/ext0/user/appmeta/external/%s/sce_sys/param.sfo",
+      "/mnt/ext1/user/appmeta/external/%s/sce_sys/param.sfo",
       NULL,
   };
   char path[512];
@@ -395,6 +409,13 @@ read_param_value_by_title_id(const char *title_id, const char *key, char *out, s
     }
   }
   return -1;
+}
+
+int
+read_param_value_from_sfo(const char *sfo_path, const char *key, char *out, size_t out_size) {
+  if (!sfo_path || !key || !out || out_size < 2) return -1;
+  out[0] = '\0';
+  return sfo_read_value_for_key(sfo_path, key, out, out_size) ? 0 : -1;
 }
 
 int

@@ -24,6 +24,7 @@ const char *platform_for_title_id(const char *title_id);
 int cr_title_is_known_media_app(const char *title_id, const char *name);
 
 int read_param_value_by_title_id(const char *title_id, const char *key, char *out, size_t out_size);
+int read_param_value_from_sfo(const char *sfo_path, const char *key, char *out, size_t out_size);
 int load_title_meta(const char *dir_path, const char *fallback_id, char *title_id, size_t id_size,
                     char *title_name, size_t name_size);
 

@@ -3,47 +3,33 @@ cmake_minimum_required(VERSION 3.10)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 project(CheatRunnerPayload C)
-set(CHEATRUNNER_VERSION "0.1")
+set(CHEATRUNNER_VERSION "0.11")
 
-# Embed CheatRunner.png as a C byte array (cheatrunner_png.h in build dir)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/CheatRunner.png" _CR_PNG_HEX HEX)
-string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _CR_PNG_BYTES "${_CR_PNG_HEX}")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/cheatrunner_png.h"
-  "static const unsigned char g_cheatrunner_png[] = {${_CR_PNG_BYTES}};\n"
-)
+# Embed CheatRunner.png as a C byte array (cheatrunner_png.h in build dir).
+# If the asset is missing, generate a tiny fallback icon so builds still work.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/CheatRunner.png")
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/CheatRunner.png" _CR_PNG_HEX HEX)
+  string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _CR_PNG_BYTES "${_CR_PNG_HEX}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/cheatrunner_png.h"
+    "static const unsigned char g_cheatrunner_png[] = {${_CR_PNG_BYTES}};\n"
+  )
+else()
+  message(WARNING "CheatRunner.png missing; generating fallback cheatrunner_png.h")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/cheatrunner_png.h"
+    "static const unsigned char g_cheatrunner_png[] = {"
+    "0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,"
+    "0x00,0x00,0x00,0x0D,0x49,0x48,0x44,0x52,0x00,0x00,0x00,0x01,"
+    "0x00,0x00,0x00,0x01,0x08,0x06,0x00,0x00,0x00,0x1F,0x15,0xC4,"
+    "0x89,0x00,0x00,0x00,0x0D,0x49,0x44,0x41,0x54,0x78,0x9C,0x63,"
+    "0x00,0x01,0x00,0x00,0x05,0x00,0x01,0x0D,0x0A,0x2D,0xB4,0x00,"
+    "0x00,0x00,0x00,0x49,0x45,0x4E,0x44,0xAE,0x42,0x60,0x82};\n"
+  )
+endif()
+
+file(GLOB CHEATRUNNER_SRC CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c")
 
 add_executable(CheatRunner
-  src/main.c
-  src/cr_log.c
-  src/cr_paths.c
-  src/cr_config.c
-  src/cr_notifications.c
-  src/cr_activity.c
-  src/cr_json.c
-  src/cr_titles.c
-  src/cr_appdb.c
-  src/cr_game_monitor.c
-  src/cr_launch.c
-  src/cr_memory.c
-  src/cr_cheat_formats.c
-  src/cr_cheats.c
-  src/cr_remote_sources.c
-  src/cr_source_jobs.c
-  src/cr_api.c
-  src/cr_api_dashboard.c
-  src/cr_api_games.c
-  src/cr_api_cheats.c
-  src/cr_api_sources.c
-  src/cr_api_logs.c
-  src/cr_api_dev.c
-  src/cr_repo_mirror.c
-  src/cr_browser.c
-  src/cr_http.c
-  src/cr_shutdown.c
-  src/jb.c
-  src/priv_bootstrap.c
-  src/http_client.c
-  src/pt.c
+  ${CHEATRUNNER_SRC}
   src/third_party/cJSON.c
   src/third_party/mc4/aes.c
   src/third_party/mc4/base64.c
@@ -55,6 +41,7 @@ set_target_properties(CheatRunner PROPERTIES
 )
 
 target_include_directories(CheatRunner PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(CheatRunner PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_options(CheatRunner PRIVATE -Wall -Wextra -O2)
 target_compile_definitions(CheatRunner PRIVATE CHEATRUNNER_VERSION="${CHEATRUNNER_VERSION}")
 target_link_options(CheatRunner PRIVATE "-Wl,--allow-multiple-definition")
