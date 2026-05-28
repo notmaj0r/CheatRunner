@@ -148,30 +148,6 @@ CheatRunner will try to match cheats by title ID and version when possible.
 
 ---
 
-## 📁 Local Patches
-
-CheatRunner can auto-apply PS-Game-Patch style XML patches when a matching game starts.
-
-Default paths:
-
-```text
-/data/cheatrunner/patches
-/data/elf-arsenal/patches
-```
-
-Recommended folders:
-
-```text
-/data/cheatrunner/patches/xml
-/data/cheatrunner/patches/json
-/data/cheatrunner/patches/shn
-/data/cheatrunner/patches/mc4
-```
-
-CheatRunner matches patches by title ID, honors `AppVer` when present, converts `ImageBase` patch addresses to runtime-relative offsets, and pauses kstuff before memory writes when kstuff runtime control is available.
-
----
-
 ## 🌐 Remote Cheat Sources
 
 CheatRunner can optionally download cheat files from configured cheat repositories.
@@ -230,16 +206,6 @@ Output:
 ```text
 build/CheatRunner.elf
 ```
-
----
-
-## 🧭 Roadmap
-
-The following features were removed from the v0.1 stabilization pass and may return in a future release:
-
-- controller hotkeys / ScePad monitor.
-
-They were removed to keep the first stable CheatRunner release focused on games, launching, local/remote cheats, and trainer stability.
 
 ---
 
