@@ -22,7 +22,7 @@
 "        <img class=\"cr-brand-icon\" src=\"/CheatRunner.png\" alt=\"CheatRunner\">\n"
 "        <div>\n"
 "          <h1>CheatRunner</h1>\n"
-"          <div class=\"sub\">Web Cheat Trainer by maj0r</div>\n"
+"          <div class=\"sub\">Web Cheat Trainer by maj0r&JX</div>\n"
 "        </div>\n"
 "      </div>\n"
 "      <div class=\"topbar-right\">\n"
