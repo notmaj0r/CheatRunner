@@ -73,7 +73,9 @@ source_model_defaults(source_config_model_t *m) {
              "PS5_Cheats", "main", "", 1);
   source_set(&m->cheat_sources[2], "GoldHEN-Cheats", "github", "GoldHEN",
              "GoldHEN_Cheat_Repository", "main", "", 1);
-  m->cheat_count = 3;
+  source_set(&m->cheat_sources[3], "HEN-PPSA-Cheats", "github", "RDX-Sci01",
+           "HEN-PPSA-Cheats", "main", "", 1);
+  m->cheat_count = 4;
 }
 
 static int
