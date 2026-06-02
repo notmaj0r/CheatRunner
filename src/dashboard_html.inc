@@ -125,7 +125,7 @@
 "              <option value=\"hencollection\">HEN Cheats Collection</option>\n"
 "              <option value=\"ps5cheats\">PS5 Cheats</option>\n"
 "              <option value=\"goldhen\">GoldHEN Cheats</option>\n"
-"              <option value=\"goldhen\">PPSA-Only RDX-Cheats</option>\n"
+"              <option value=\"PPSAonly\">PPSA-Only RDX-Cheats</option>\n"
 "            </select>\n"
 "            <label style=\"align-self:center;margin:0 6px;\">\n"
 "              <input type=\"checkbox\" id=\"repoOverwrite\"> Overwrite existing\n"
