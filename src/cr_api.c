@@ -3293,6 +3293,7 @@ handle_api_cheats_repo_download(int fd, const char *query) {
   if (!source[0] || (strcmp(source, "hencollection") != 0 &&
                      strcmp(source, "ps5cheats")     != 0 &&
                      strcmp(source, "goldhen")       != 0 &&
+                     strcmp(source, "PPSAonly")      != 0 &&
                      strcmp(source, "all")           != 0)) {
     http_send_json(fd, 400,
       "{\"ok\":false,\"error\":\"invalid_source\","
