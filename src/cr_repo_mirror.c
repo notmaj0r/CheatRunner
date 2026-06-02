@@ -45,6 +45,7 @@ static const repo_def_t REPOS[] = {
   { "hencollection", "TeeKay87", "HEN-Cheats-Collection", "master", "cheats" },
   { "ps5cheats",     "etaHEN",   "PS5_Cheats",            "main",   ""       },
   { "goldhen",       "GoldHEN",  "GoldHEN_Cheat_Repository", "main", ""      },
+  { "PPSAonly", "RDX-Sci01", "HEN-PPSA-Cheats", "main", "cheats" },
 };
 
 #define REPOS_COUNT ((int)(sizeof(REPOS) / sizeof(REPOS[0])))
