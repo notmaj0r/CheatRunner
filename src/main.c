@@ -19,7 +19,7 @@
 #include "cr_shutdown.h"
 
 #ifndef CHEATRUNNER_VERSION
-#define CHEATRUNNER_VERSION "0.1"
+#define CHEATRUNNER_VERSION "0.15"
 #endif
 
 int
@@ -72,8 +72,8 @@ main(void) {
   activity_load();
   rpc_refresh_title_and_notify();
   set_launch_status_ex(0, "idle", "", "ready", 1, "", 0, 0);
-  notify("CheatRunner v" CHEATRUNNER_VERSION " by maj0r");
-  notification_add("boot", "CheatRunner v" CHEATRUNNER_VERSION " started");
+  notify("CheatRunner-RDX v" CHEATRUNNER_VERSION " by maj0r&JX");
+  notification_add("boot", "CheatRunner-RDX v" CHEATRUNNER_VERSION " started");
   cr_log("info", "boot", "version %s", CHEATRUNNER_VERSION);
 
   pthread_t http_thread;
