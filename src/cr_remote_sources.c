@@ -73,7 +73,9 @@ source_model_defaults(source_config_model_t *m) {
              "PS5_Cheats", "main", "", 1);
   source_set(&m->cheat_sources[2], "GoldHEN-Cheats", "github", "GoldHEN",
              "GoldHEN_Cheat_Repository", "main", "", 1);
-  m->cheat_count = 3;
+  source_set(&m->cheat_sources[3], "HEN-PPSA-Cheats", "github", "RDX-Sci01",
+             "HEN-PPSA-Cheats", "main", "cheats", 1);
+  m->cheat_count = 4;
 }
 
 static int
@@ -138,6 +140,23 @@ source_model_load(source_config_model_t *m) {
     }
     if (n > 0) {
       m->cheat_count = n;
+      /* Append any built-in default sources absent from the saved list (new sources
+       * added in later builds are picked up automatically without losing saved state). */
+      source_config_model_t defs;
+      source_model_defaults(&defs);
+      for (int d = 0; d < defs.cheat_count && m->cheat_count < MAX_REMOTE_SOURCES; d++) {
+        int found = 0;
+        for (int i = 0; i < m->cheat_count; i++) {
+          if (!strcasecmp(m->cheat_sources[i].id, defs.cheat_sources[d].id)) {
+            found = 1;
+            break;
+          }
+        }
+        if (!found) {
+          m->cheat_sources[m->cheat_count++] = defs.cheat_sources[d];
+          cr_log("info", "sources", "added new default source '%s'", defs.cheat_sources[d].name);
+        }
+      }
     }
   }
   cJSON_Delete(root);

@@ -77,9 +77,9 @@ cr_source_job_start(cJSON *req, int *out_job_id) {
   else if (!strcmp(type_j->valuestring, "cheat_download")) type = CR_JOB_CHEAT_DOWNLOAD;
   else return -2; /* unknown type */
 
-  char title_id[16]    = {0};
-  char version[64]     = {0};
-  char body_copy[4096] = {0};
+  char title_id[16]     = {0};
+  char version[64]      = {0};
+  char body_copy[16384] = {0};
 
   if (type == CR_JOB_CHEAT_FIND) {
     cJSON *tid_j = cJSON_GetObjectItem(req, "titleId");
@@ -262,7 +262,7 @@ source_job_thread(void *arg) {
   if (slot_idx < 0) { pthread_mutex_unlock(&g_jobs_lock); return NULL; }
   g_jobs[slot_idx].state = CR_JOB_RUNNING;
   cr_job_type_t type = g_jobs[slot_idx].type;
-  char title_id[16], version[64], body_copy[4096];
+  char title_id[16], version[64], body_copy[16384];
   snprintf(title_id,  sizeof(title_id),  "%s", g_jobs[slot_idx].title_id);
   snprintf(version,   sizeof(version),   "%s", g_jobs[slot_idx].version);
   snprintf(body_copy, sizeof(body_copy), "%s", g_jobs[slot_idx].body_json);

@@ -63,6 +63,8 @@ void set_launch_status_ex_gen(uint64_t gen, int busy, const char *phase, const c
                               const char *message, int last_ok, const char *method, int rc, int verified);
 /* Stale watchdog: if launch has been busy longer than threshold, auto-recovers. Returns 1 if recovered. */
 int launch_status_recover_stale(void);
+/* Called by game_monitor when a game starts: if launch_status is "timeout"/"failed" for this title, recover to "ready". */
+void launch_status_recover_for_game(const char *title_id);
 void *launch_worker_thread(void *arg);
 
 #endif

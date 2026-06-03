@@ -55,6 +55,8 @@ typedef struct cheatrunner_config {
   char log_level[16];
   int cheat_master_code_fixup;
   int cheat_codecave_fallback;
+  int cheat_addr_cache_enabled;
+  int cheat_inter_mod_delay_ms;
 } cheatrunner_config_t;
 
 extern pthread_mutex_t      g_cfg_lock;
@@ -63,6 +65,7 @@ extern cheatrunner_config_t g_cfg;
 void config_set_defaults(cheatrunner_config_t *cfg);
 int  config_load(void);
 int  config_save_locked(void);
+void config_check_reload(void);
 
 void cfg_get_cheat_remote_opts(int *sources_enabled, int *download_enabled, int *ttl_sec, int *max_bytes);
 

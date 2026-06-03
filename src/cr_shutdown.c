@@ -1,4 +1,5 @@
 #include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -43,7 +44,12 @@ delayed_shutdown_thread(void *arg) {
   activity_save();
   notifications_save();
   cr_log("info", "dev", "CheatRunner exiting for reload");
-  exit(0);
+  kill(getpid(), SIGKILL);
+  /* Guaranteed exit: if self-SIGKILL is somehow refused/deferred (PS5 credential
+   * quirk), fall through to _exit so the process always dies — otherwise the
+   * thread would just return and CheatRunner would keep running ("shutdown
+   * didn't work"). */
+  _exit(0);
   return NULL;
 }
 
@@ -54,7 +60,8 @@ cheatrunner_request_shutdown(int delay_ms) {
     g_shutdown_requested = 1;
     g_game_monitor_running = 0;
     cheatrunner_close_servers();
-    exit(0);
+    kill(getpid(), SIGKILL);
+    _exit(0);
     return;
   }
   *p = delay_ms;
@@ -67,5 +74,6 @@ cheatrunner_request_shutdown(int delay_ms) {
   g_shutdown_requested = 1;
   g_game_monitor_running = 0;
   cheatrunner_close_servers();
-  exit(0);
+  kill(getpid(), SIGKILL);
+  _exit(0);
 }

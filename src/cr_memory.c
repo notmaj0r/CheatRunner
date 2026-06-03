@@ -145,6 +145,47 @@ write_process_memory(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) 
   return write_process_memory_ex(pid, addr, data, len, NULL);
 }
 
+/* Returns 1 if the first byte looks like a plausible x86-64 instruction start.
+ * Used to distinguish absolute vs relative SHN/MC4 offsets when no expected bytes exist.
+ * A null first byte almost always means data/uninitialized memory, not code. */
+static int
+x86_looks_like_code(const uint8_t *b, size_t len) {
+  if (!b || len == 0) return 0;
+  uint8_t fb = b[0];
+  if (fb >= 0x40 && fb <= 0x4F) return 1; /* REX prefix — extremely common in 64-bit code */
+  switch (fb) {
+    case 0x0F: /* 2-byte escape (SSE, CMOV, MOVZX, …) */
+    case 0x29: case 0x2B:              /* SUB */
+    case 0x31: case 0x33:              /* XOR */
+    case 0x50: case 0x51: case 0x52: case 0x53: /* PUSH reg */
+    case 0x54: case 0x55: case 0x56: case 0x57:
+    case 0x58: case 0x59: case 0x5A: case 0x5B: /* POP reg */
+    case 0x5C: case 0x5D: case 0x5E: case 0x5F:
+    case 0x66:                         /* operand-size prefix */
+    case 0x72: case 0x73:              /* JB / JAE */
+    case 0x74: case 0x75:              /* JE / JNE */
+    case 0x7C: case 0x7D: case 0x7E: case 0x7F: /* JL / JGE / JLE / JG */
+    case 0x81: case 0x83: case 0x85:   /* ADD/SUB/AND/OR/CMP + TEST */
+    case 0x89: case 0x8B: case 0x8D:   /* MOV / LEA */
+    case 0x90:                         /* NOP */
+    case 0xB8: case 0xB9: case 0xBA: case 0xBB: /* MOV reg, imm64 */
+    case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+    case 0xC3: case 0xC7:              /* RET / MOV r/m, imm32 */
+    case 0xE8:                         /* CALL rel32 */
+    case 0xE9: case 0xEB:              /* JMP rel32 / rel8 */
+    case 0xF2: case 0xF3:              /* REP/REPNE prefix */
+    case 0xFF:                         /* CALL/JMP indirect, PUSH r/m, INC/DEC */
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+
+/* Canonical x86-64 user-space limit. Probe reads above this address risk
+ * hitting kernel space or PS5 MMIO regions that cause ptrace page-fault hangs. */
+#define ADDR_IN_USER_RANGE(a) ((intptr_t)(a) >= 0x1000L && (intptr_t)(a) <= (intptr_t)0x7FFFFFFFFFFFL)
+
 intptr_t
 cheat_resolve_write_addr_ex(pid_t pid, intptr_t base, uint64_t off_u,
                              int abs_flag, int is_non_json, int auto_detect,
@@ -162,9 +203,96 @@ cheat_resolve_write_addr_ex(pid_t pid, intptr_t base, uint64_t off_u,
     return abs_flag ? abs_addr : rel_addr;
   }
 
-  /* Non-JSON without reliable expected bytes: apply fallback policy directly.
-   * This must come BEFORE the auto_detect guard — the fallback policy requires no probing. */
+  /* Non-JSON without reliable expected bytes: try several probes before falling back. */
   if (!expected_reliable) {
+    /* Tier 1 — off_bytes byte-exact probe (highest confidence, runs for any length).
+     *
+     * When the caller supplies expect_b (off_bytes from MC4/SHN ValueOff) we read
+     * the full byte_len from both candidates and pick the one that matches exactly.
+     * This is far more reliable than the x86 heuristic: for well-formed cheats
+     * ValueOff == original game code bytes, which are unique to the correct address.
+     * Covers both hooks AND code caves (byte_len >= 16) which x86_probe skips. */
+    if (expect_b != NULL && auto_detect && pid > 0 && off_u >= 0x1000ULL &&
+        byte_len > 0 && byte_len <= 128) {
+      uint8_t probe_off[128];
+      /* Read the relative candidate first: the absolute candidate is the raw
+       * cheat offset and can map to PS5 GPU/MMIO, where a ptrace read page-faults
+       * and freezes the game.  Checking base+offset first means the raw offset is
+       * only touched when relative didn't match. */
+      int rel_off_match = (ADDR_IN_USER_RANGE(rel_addr) &&
+                           read_process_memory(pid, rel_addr, probe_off, byte_len) == 0 &&
+                           memcmp(probe_off, expect_b, byte_len) == 0);
+      int abs_off_match = (!rel_off_match &&
+                           ADDR_IN_USER_RANGE(abs_addr) &&
+                           read_process_memory(pid, abs_addr, probe_off, byte_len) == 0 &&
+                           memcmp(probe_off, expect_b, byte_len) == 0);
+      if (rel_off_match) {
+        if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_OK_OFFBYTES_PROBE;
+        if (!silent)
+          cr_log("info", "cheats.mem",
+                 "addr_offbytes_probe off=0x%llx → relative=0x%lx (off_bytes match)",
+                 (unsigned long long)off_u, (long)rel_addr);
+        return rel_addr;
+      }
+      if (abs_off_match) {
+        if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_OK_OFFBYTES_PROBE;
+        if (!silent)
+          cr_log("info", "cheats.mem",
+                 "addr_offbytes_probe off=0x%llx → absolute=0x%lx (off_bytes match)",
+                 (unsigned long long)off_u, (long)abs_addr);
+        return abs_addr;
+      }
+      /* off_bytes not found at either candidate (ValueOff may be NOPs/placeholders).
+       * Fall through to x86_probe for hooks, then to policy-based fallback. */
+      if (!silent)
+        cr_log("debug", "cheats.mem",
+               "addr_offbytes_probe off=0x%llx no match at abs=0x%lx or rel=0x%lx — trying x86_probe",
+               (unsigned long long)off_u, (long)abs_addr, (long)rel_addr);
+    }
+
+    /* Tier 2 — X86 instruction heuristic probe (hooks only, len < 16).
+     *
+     * Reads 4 bytes from both candidates and checks which one starts with a
+     * plausible x86-64 instruction prefix.  Weaker than off_bytes probe (first-byte
+     * heuristic has ~30-40% false-positive rate) but still useful when ValueOff is
+     * generic (NOPs/zeros) and both abs and rel are mapped memory. */
+    if (auto_detect && pid > 0 && off_u >= 0x1000ULL && byte_len > 0 && byte_len < 16) {
+      uint8_t pb_rel[4] = {0}, pb_abs[4] = {0};
+      /* Relative-first (same rule as Tier 1 and the reliable-probe branch): never
+       * read the raw absolute offset until the relative candidate is ruled out.
+       * The raw offset can map to PS5 GPU/MMIO, where a ptrace read page-faults and
+       * never returns, freezing the game.  If the relative candidate already looks
+       * like code we return it without ever touching the absolute candidate. */
+      int rel_read = (ADDR_IN_USER_RANGE(rel_addr) &&
+                      read_process_memory(pid, rel_addr, pb_rel, 4) == 0);
+      if (rel_read && x86_looks_like_code(pb_rel, 4)) {
+        if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_OK_X86_PROBE;
+        if (!silent)
+          cr_log("info", "cheats.mem",
+                 "addr_x86_probe off=0x%llx → relative=0x%lx (x86 match)",
+                 (unsigned long long)off_u, (long)rel_addr);
+        return rel_addr;
+      }
+      int abs_read = (ADDR_IN_USER_RANGE(abs_addr) &&
+                      read_process_memory(pid, abs_addr, pb_abs, 4) == 0);
+      if (abs_read && x86_looks_like_code(pb_abs, 4)) {
+        if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_OK_X86_PROBE;
+        if (!silent)
+          cr_log("info", "cheats.mem",
+                 "addr_x86_probe off=0x%llx → absolute=0x%lx (x86 match) rel=0x%lx (%s)",
+                 (unsigned long long)off_u, (long)abs_addr, (long)rel_addr,
+                 rel_read ? "non-x86" : "unreadable");
+        return abs_addr;
+      }
+      /* Neither candidate looks like x86 — fall through to policy-based fallback */
+      if (!silent && (rel_read || abs_read))
+        cr_log("debug", "cheats.mem",
+               "addr_x86_probe off=0x%llx ambiguous: rel=0x%lx (%s) abs=0x%lx (%s) — using policy",
+               (unsigned long long)off_u,
+               (long)rel_addr, rel_read ? "non-x86" : "unreadable",
+               (long)abs_addr, abs_read ? "non-x86" : "unreadable");
+    }
+
     intptr_t fallback;
     cr_addr_resolve_status_t st;
     const char *mode_str;
@@ -208,38 +336,26 @@ cheat_resolve_write_addr_ex(pid_t pid, intptr_t base, uint64_t off_u,
     return rel_addr;
   }
 
-  /* Probe both candidates. */
+  /* Probe the RELATIVE candidate first and return on match.  The absolute
+   * candidate is the raw cheat offset, which on PS5 can map to GPU/MMIO;
+   * reading it under ptrace triggers a kernel page-fault that never returns,
+   * freezing the game.  base+offset is the correct target for the vast
+   * majority of MC4/SHN cheats, so checking it first means the raw offset is
+   * never touched in the common case.  Preserves the previous tie-break
+   * (relative wins when both match). */
   uint8_t probe[128];
-  int abs_match = 0, rel_match = 0;
 
-  if (read_process_memory(pid, abs_addr, probe, byte_len) == 0) {
-    if (memcmp(probe, on_b, byte_len) == 0 ||
-        (expect_b && memcmp(probe, expect_b, byte_len) == 0)) {
-      abs_match = 1;
-    }
-  }
-  if (read_process_memory(pid, rel_addr, probe, byte_len) == 0) {
-    if (memcmp(probe, on_b, byte_len) == 0 ||
-        (expect_b && memcmp(probe, expect_b, byte_len) == 0)) {
-      rel_match = 1;
-    }
-  }
-
-  if (abs_match && rel_match) {
-    if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_AMBIGUOUS;
-    if (!silent)
-      cr_log("warn", "cheats.mem",
-             "addr_ambiguous off=0x%llx abs=0x%lx rel=0x%lx both matched; preferring relative",
-             (unsigned long long)off_u, (long)abs_addr, (long)rel_addr);
+  if (read_process_memory(pid, rel_addr, probe, byte_len) == 0 &&
+      (memcmp(probe, on_b, byte_len) == 0 ||
+       (expect_b && memcmp(probe, expect_b, byte_len) == 0))) {
+    if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_OK_VERIFIED;
     return rel_addr;
   }
-  if (abs_match) {
+  if (read_process_memory(pid, abs_addr, probe, byte_len) == 0 &&
+      (memcmp(probe, on_b, byte_len) == 0 ||
+       (expect_b && memcmp(probe, expect_b, byte_len) == 0))) {
     if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_OK_VERIFIED;
     return abs_addr;
-  }
-  if (rel_match) {
-    if (resolve_status) *resolve_status = CR_ADDR_RESOLVE_OK_VERIFIED;
-    return rel_addr;
   }
 
   /* Reliable expected provided but neither candidate matched — true unresolved. */
@@ -278,6 +394,7 @@ bytes_to_hex(const uint8_t *bytes, size_t len, char *out, size_t out_size) {
   }
 }
 
+
 int
 resolve_module_base(pid_t pid, const char *module_name, intptr_t eboot_base, intptr_t *out_base) {
   if (!out_base) return -1;
@@ -311,16 +428,31 @@ int
 write_process_memory_forced(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) {
   intptr_t page = (intptr_t)ROUND_PG_DOWN((uintptr_t)addr);
   size_t   span = (size_t)(ROUND_PG_UP((uintptr_t)addr + len) - (uintptr_t)page);
-  if (kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
-    return -4;
+  int mrc = kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
+  cr_log("debug", "cheats.mem", "mprotect_rwx page=0x%lx span=0x%zx rc=%d",
+         (long)page, span, mrc);
+  if (mrc != 0) {
+    cr_log("info", "cheats.mem",
+           "mprotect_failed page=0x%lx rc=%d — codecave fallback addr=0x%lx len=%zu",
+           (long)page, mrc, (long)addr, len);
+    return write_via_codecave(pid, addr, data, len);
+  }
   int wrc = pt_copyin(pid, data, addr, len);
-  kernel_mprotect(pid, page, span, PROT_READ | PROT_EXEC);
+  cr_log("debug", "cheats.mem", "copyin addr=0x%lx len=%zu rc=%d", (long)addr, len, wrc);
+  /* Leave the page READ|WRITE|EXEC. Forcing it back to R-X stripped WRITE from the
+   * page — fine for a hook in a pure code page, but MC4/SHN code caves frequently
+   * land in a page the GAME also writes to (the cave region sits well past .text,
+   * in mixed data). Removing write from such a page makes the game's next store
+   * there page-fault → freeze shortly after the cheat is applied. Keeping the page
+   * RWX (it was already RWX for the copyin) preserves both execution of the cave
+   * and the game's own writes. */
+  kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
   return (wrc < 0) ? -1 : 0;
 }
 
 int
 write_via_codecave(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) {
-  if (!data || len == 0 || len > 128) return -1;
+  if (!data || len == 0 || len > 256) return -1;
   intptr_t page = (intptr_t)ROUND_PG_DOWN((uintptr_t)addr);
   size_t   span = (size_t)(ROUND_PG_UP((uintptr_t)addr + len) - (uintptr_t)page);
 
@@ -344,20 +476,30 @@ write_via_codecave(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) {
     return -1;
   }
 
-  /* Restore original bytes then apply the patch */
+  /* Restore original bytes then apply the patch.  Keep `orig` until after the
+   * verify so a failed write can be rolled back — freeing it here would leave a
+   * half-applied patch in the anonymous mapping with no way to restore. */
   pt_copyin(pid, orig, page, span);
-  free(orig);
   pt_copyin(pid, data, addr, len);
 
-  /* Make the page RX */
-  kernel_mprotect(pid, page, span, PROT_READ | PROT_EXEC);
+  /* Leave the cave RWX. This page now backs a code cave the game jumps into and
+   * may also write through; stripping write could fault the game. */
+  kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
 
   /* Verify */
-  uint8_t vbuf[128];
+  uint8_t vbuf[256];
   if (pt_copyout(pid, addr, vbuf, len) < 0 || memcmp(vbuf, data, len) != 0) {
-    cr_log("warn", "cheats.cave", "cave verify failed addr=0x%lx len=%zu", (long)addr, len);
+    cr_log("warn", "cheats.cave",
+           "cave verify failed addr=0x%lx len=%zu — restoring original page", (long)addr, len);
+    /* Roll the page back to its original contents: this MAP_FIXED page replaced
+     * the game's original mapping, so leaving a partially-written cave here can
+     * crash the game when the hook jumps into it. */
+    pt_copyin(pid, orig, page, span);
+    kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
+    free(orig);
     return -1;
   }
+  free(orig);
   cr_log("info", "cheats.cave", "cave write ok addr=0x%lx len=%zu", (long)addr, len);
   return 0;
 }

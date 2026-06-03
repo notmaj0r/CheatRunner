@@ -1,6 +1,7 @@
 #include <string.h>
 #include "cr_api_internal.h"
 #include "cr_api_games.h"
+#include "cr_favorites.h"
 
 int
 cr_api_games_handle(int fd, const char *method, const char *path,
@@ -84,6 +85,18 @@ cr_api_games_handle(int fd, const char *method, const char *path,
   }
   if (!strcmp(path, "/api/diag/title")) {
     handle_api_diag_title(fd, query);
+    return 1;
+  }
+  if (!strcmp(path, "/api/favorites")) {
+    handle_api_favorites_get(fd);
+    return 1;
+  }
+  if (!strcmp(path, "/api/favorites/set")) {
+    handle_api_favorites_set(fd, query);
+    return 1;
+  }
+  if (!strcmp(path, "/api/favorites/recent")) {
+    handle_api_favorites_recent(fd, query);
     return 1;
   }
   return 0;

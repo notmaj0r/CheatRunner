@@ -429,6 +429,25 @@ set_launch_status_ex_gen(uint64_t gen, int busy, const char *phase, const char *
   pthread_mutex_unlock(&g_launch_status_lock);
 }
 
+void
+launch_status_recover_for_game(const char *title_id) {
+  if (!title_id || !title_id[0]) return;
+  pthread_mutex_lock(&g_launch_status_lock);
+  if (!g_launch_status.busy &&
+      g_launch_status.last_ok == 0 &&
+      strcmp(g_launch_status.title_id, title_id) == 0 &&
+      (strcmp(g_launch_status.phase, "timeout") == 0 ||
+       strcmp(g_launch_status.phase, "failed") == 0)) {
+    char old_phase[32];
+    snprintf(old_phase, sizeof(old_phase), "%s", g_launch_status.phase);
+    set_launch_status_locked(0, "ready", title_id,
+                             "Game is running (detected after launch timeout)", 1,
+                             g_launch_status.method, g_launch_status.rc, 0);
+    cr_log("info", "launch", "launch_status recovered to ready for %s (was %s)", title_id, old_phase);
+  }
+  pthread_mutex_unlock(&g_launch_status_lock);
+}
+
 int
 launch_status_recover_stale(void) {
   int threshold_ms;
@@ -540,16 +559,27 @@ launch_worker_thread(void *arg) {
   uint64_t my_gen = req.generation;
   set_launch_status_ex_gen(my_gen, 1, "killing_current", req.title_id, "Closing current game...", 0, "", 0, 0);
   cr_log("info", "launch", "request title=%s args=\"%s\"", req.title_id, req.args[0] ? req.args : "");
-  /* Preflight: if target is already running per game monitor, skip relaunch entirely */
+  /* Preflight: if the monitor cache says the game is running, do a live system
+   * check before short-circuiting. The cache can be up to 500 ms stale after a
+   * manual close, causing CheatRunner to wrongly block a relaunch. */
   {
     running_game_state_t cur;
     running_state_get(&cur);
     if (cur.running && strcmp(cur.title_id, req.title_id) == 0) {
-      __atomic_store_n(&g_last_launch_verified_at_ms, now_ms(), __ATOMIC_RELEASE);
-      set_launch_status_ex_gen(my_gen, 0, "ready", req.title_id, "Game is already running", 1, "already_running", 0, 1);
-      notification_add("launch", "Game already running: %s", req.title_id);
-      cr_log("info", "launch", "game already running %s; skipping relaunch", req.title_id);
-      return NULL;
+      int live_app_id = sceSystemServiceGetAppIdOfRunningBigApp();
+      int truly_running = (live_app_id > 0 && live_app_id == cur.app_id);
+      if (truly_running) {
+        __atomic_store_n(&g_last_launch_verified_at_ms, now_ms(), __ATOMIC_RELEASE);
+        set_launch_status_ex_gen(my_gen, 0, "ready", req.title_id, "Game is already running", 1, "already_running", 0, 1);
+        notification_add("launch", "Game already running: %s", req.title_id);
+        cr_log("info", "launch", "game already running %s; skipping relaunch", req.title_id);
+        return NULL;
+      }
+      /* Monitor cache is stale — game closed since last poll. Force update and continue. */
+      cr_log("info", "launch",
+             "stale monitor state for %s (cached appId=0x%x live appId=0x%x) — game has closed, relaunching",
+             req.title_id, cur.app_id, live_app_id);
+      rpc_refresh_title_and_notify();
     }
   }
   /* Snapshot all config fields used in this thread under a single lock acquisition */

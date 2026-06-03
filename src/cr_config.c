@@ -3,8 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include "cr_config.h"
 #include "cr_log.h"
+
+static time_t g_cfg_mtime = 0;
 
 pthread_mutex_t g_cfg_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -14,7 +17,7 @@ cheatrunner_config_t g_cfg = {
     .auto_download_missing_cheat = 0,
     .launch_kill_current = 1,
     .launch_kill_delay_ms = 1000,
-    .launch_wait_timeout_ms = 30000,
+    .launch_wait_timeout_ms = 60000,
     .cheat_engine = 1,
     .cheat_validate_original_bytes = 1,
     .cheat_restore_rx = 0,
@@ -57,8 +60,14 @@ cheatrunner_config_t g_cfg = {
     .games_cache_ttl_ms = 30000,
     .appdb_debug_names = 0,
     .log_level = "info",
-    .cheat_master_code_fixup = 0,
-    .cheat_codecave_fallback = 0,
+    /* Enabled by default for MC4/SHN code-cave + master-code cheat compatibility.
+     * Both are additive (codecave_fallback only engages when a write doesn't stick;
+     * master_code_fixup only for MC-dependent mods), so currently-working cheats
+     * are unaffected. */
+    .cheat_master_code_fixup = 1,
+    .cheat_codecave_fallback = 1,
+    .cheat_addr_cache_enabled = 1,
+    .cheat_inter_mod_delay_ms = 0,
 };
 
 void
@@ -72,7 +81,7 @@ config_set_defaults(cheatrunner_config_t *cfg) {
       .auto_download_missing_cheat = 0,
       .launch_kill_current = 1,
       .launch_kill_delay_ms = 1000,
-      .launch_wait_timeout_ms = 30000,
+      .launch_wait_timeout_ms = 60000,
       .cheat_engine = 1,
       .cheat_validate_original_bytes = 1,
       .cheat_restore_rx = 0,
@@ -114,12 +123,14 @@ config_set_defaults(cheatrunner_config_t *cfg) {
       .log_level = "info",
       .cheat_master_code_fixup = 0,
       .cheat_codecave_fallback = 0,
+      .cheat_addr_cache_enabled = 1,
+      .cheat_inter_mod_delay_ms = 0,
   };
 }
 
 int
 config_save_locked(void) {
-  char txt[4096];
+  char txt[5120];
   int n = snprintf(
       txt, sizeof(txt),
       "http_port=%d\n"
@@ -168,6 +179,8 @@ config_save_locked(void) {
       "log_level=%s\n"
       "cheat_master_code_fixup=%d\n"
       "cheat_codecave_fallback=%d\n"
+      "cheat_addr_cache_enabled=%d\n"
+      "cheat_inter_mod_delay_ms=%d\n"
       "theme=%s\n",
       g_cfg.http_port, g_cfg.auto_load_cheat_menu,
       g_cfg.auto_download_missing_cheat, g_cfg.launch_kill_current,
@@ -191,6 +204,7 @@ config_save_locked(void) {
       g_cfg.title_lookup_enabled, g_cfg.title_lookup_cache_enabled, g_cfg.title_lookup_timeout_ms,
       g_cfg.games_cache_ttl_ms, g_cfg.appdb_debug_names, g_cfg.log_level,
       g_cfg.cheat_master_code_fixup, g_cfg.cheat_codecave_fallback,
+      g_cfg.cheat_addr_cache_enabled, g_cfg.cheat_inter_mod_delay_ms,
       g_cfg.theme);
   if (n <= 0 || (size_t)n >= sizeof(txt)) {
     return -1;
@@ -320,6 +334,11 @@ config_load(void) {
       g_cfg.cheat_master_code_fixup = atoi(v) ? 1 : 0;
     } else if (!strcmp(k, "cheat_codecave_fallback")) {
       g_cfg.cheat_codecave_fallback = atoi(v) ? 1 : 0;
+    } else if (!strcmp(k, "cheat_addr_cache_enabled")) {
+      g_cfg.cheat_addr_cache_enabled = atoi(v) ? 1 : 0;
+    } else if (!strcmp(k, "cheat_inter_mod_delay_ms")) {
+      int cv = atoi(v);
+      g_cfg.cheat_inter_mod_delay_ms = (cv >= 0 && cv <= 10000) ? cv : 0;
     } else if (!strncmp(k, "hotkey_", 7)) {
       /* removed — silently ignore */
     } else if (!strcmp(k, "klog_enabled") || !strcmp(k, "klog_host") ||
@@ -336,6 +355,11 @@ config_load(void) {
     }
   }
   fclose(fp);
+  {
+    struct stat _st;
+    if (stat(CHEATRUNNER_CONFIG_PATH, &_st) == 0)
+      g_cfg_mtime = _st.st_mtime;
+  }
   if (valid_lines == 0) {
     cr_log("warn", "config", "config file exists but contains no valid key=value entries — using defaults");
   }
@@ -371,6 +395,15 @@ config_load(void) {
   pthread_mutex_unlock(&g_cfg_lock);
   cr_log("info", "config", "config loaded");
   return 0;
+}
+
+void
+config_check_reload(void) {
+  struct stat st;
+  if (stat(CHEATRUNNER_CONFIG_PATH, &st) != 0) return;
+  if (st.st_mtime == g_cfg_mtime) return;
+  cr_log("info", "config", "config file changed on disk, reloading");
+  config_load();
 }
 
 void

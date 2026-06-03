@@ -28,6 +28,8 @@ typedef enum {
     CR_ADDR_RESOLVE_OK_UNVERIFIED_ABSOLUTE  =  2, /* no reliable expected; absolute forced */
     CR_ADDR_RESOLVE_OK_UNVERIFIED_RELATIVE  =  3, /* no reliable expected; relative forced */
     CR_ADDR_RESOLVE_AMBIGUOUS          =  4, /* both candidates matched; relative preferred */
+    CR_ADDR_RESOLVE_OK_X86_PROBE       =  5, /* no reliable expected; x86 instruction heuristic picked winner */
+    CR_ADDR_RESOLVE_OK_OFFBYTES_PROBE  =  6, /* no reliable expected; ValueOff byte-exact match picked winner */
     CR_ADDR_RESOLVE_UNRESOLVED         = -1, /* expected was reliable but neither candidate matched */
     CR_ADDR_RESOLVE_BLOCKED_NO_BASELINE= -2  /* no reliable expected and policy=block */
 } cr_addr_resolve_status_t;
@@ -74,7 +76,9 @@ int process_is_ps2_emu(pid_t pid);
 int write_via_codecave(pid_t pid, intptr_t addr, const uint8_t *data, size_t len);
 
 /* Forced write: skips kernel_get_vmem_protection, uses RWX→write→RX directly.
- * Only for rollback paths where get_vmem_protection is known to be unreliable. */
+ * Safe for all games including PS4 BC and PS5 games with special vmem entry types that
+ * cause kernel_get_vmem_protection to panic. Always restores page to PROT_READ|PROT_EXEC. */
 int write_process_memory_forced(pid_t pid, intptr_t addr, const uint8_t *data, size_t len);
+
 
 #endif

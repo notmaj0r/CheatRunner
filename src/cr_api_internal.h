@@ -34,6 +34,10 @@ void handle_api_debug_process(int fd, const char *query);
 void handle_api_status(int fd);
 void handle_api_state(int fd);
 
+/* ---- /api/cr/eboot — decrypted ELF dump from running game memory ---- */
+void handle_api_cr_eboot(int fd, const char *query);
+void handle_api_cr_eboot_delete(int fd, const char *query);
+
 /* ---- /api/cheats (local, non-remote) ---- */
 void handle_api_cheats_index(int fd);
 void handle_api_cheats_get(int fd, const char *query);
@@ -53,6 +57,7 @@ void handle_api_cheats_download(int fd, const char *query);
 void handle_api_cheats_scan(int fd, const char *query);
 void handle_api_cheats_mc4_debug(int fd, const char *query);
 void handle_api_cheats_clear_crash_flags(int fd, const char *query);
+void handle_api_cheats_disable_all(int fd, const char *query);
 void handle_api_cheats_select(int fd, const char *query);
 void handle_api_cheats_select_auto(int fd, const char *query);
 void handle_api_cheats_upload(int fd, const char *query, const char *body, size_t body_len);
@@ -71,6 +76,8 @@ void handle_api_sources_jobs_status(int fd, const char *query);
 /* ---- /api/dev, /api/cfg ---- */
 void handle_api_config(int fd);
 void handle_api_config_set(int fd, const char *query);
+void handle_api_config_reset(int fd);
+void handle_api_config_preset(int fd, const char *query);
 void handle_api_notifications(int fd);
 void handle_api_notifications_read(int fd, const char *query);
 void handle_api_notifications_clear(int fd);
@@ -85,6 +92,11 @@ void handle_api_dev_shutdown(int fd, const char *method, const char *query,
                              const char *token_header, const char *client_ip);
 void handle_api_user_context(int fd);
 void handle_api_diag_title(int fd, const char *query);
+
+/* ---- /api/title-prefs ---- */
+void handle_api_title_prefs_get(int fd, const char *query);
+void handle_api_title_prefs_set(int fd, const char *query);
+void handle_api_title_prefs_clear(int fd, const char *query);
 
 /* ---- dashboard static assets ---- */
 void http_send_png_asset(int fd);

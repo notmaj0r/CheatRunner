@@ -1,6 +1,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,8 @@
 #include <time.h>
 #include <unistd.h>
 #include "cr_paths.h"
+
+static volatile uint32_t g_write_tmp_seq = 0;
 
 void
 str_trim(char *s) {
@@ -32,7 +35,7 @@ str_trim(char *s) {
 uint64_t
 now_ms(void) {
   struct timespec ts;
-  if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
     return (uint64_t)time(NULL) * 1000ULL;
   }
   return ((uint64_t)ts.tv_sec * 1000ULL) + ((uint64_t)ts.tv_nsec / 1000000ULL);
@@ -42,7 +45,8 @@ int
 write_file_atomic(const char *path, const uint8_t *data, size_t len) {
   char tmp[512];
   int fd = -1;
-  snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+  uint32_t seq = __sync_fetch_and_add(&g_write_tmp_seq, 1u);
+  snprintf(tmp, sizeof(tmp), "%s.%u.tmp", path, (unsigned int)seq);
   fd = open(tmp, O_CREAT | O_TRUNC | O_WRONLY, 0644);
   if (fd < 0) {
     return -1;
@@ -120,6 +124,12 @@ ensure_data_dirs(void) {
   mkdir(CHEATRUNNER_CHEATS_JSON_DIR, 0755);
   mkdir(CHEATRUNNER_CHEATS_SHN_DIR, 0755);
   mkdir(CHEATRUNNER_CHEATS_MC4_DIR, 0755);
+  mkdir(CHEATRUNNER_PATCHES_DIR,      0755);
+  mkdir(CHEATRUNNER_PATCHES_XML_DIR,  0755);
+  mkdir(CHEATRUNNER_PATCHES_PS5_DIR,  0755);
+  chmod(CHEATRUNNER_PATCHES_DIR,      0777);
+  chmod(CHEATRUNNER_PATCHES_XML_DIR,  0777);
+  chmod(CHEATRUNNER_PATCHES_PS5_DIR,  0777);
   mkdir(CHEATRUNNER_CACHE_DIR, 0755);
   mkdir(CHEATRUNNER_CACHE_ICON_DIR, 0755);
   mkdir(CHEATRUNNER_CACHE_PIC0_DIR, 0755);

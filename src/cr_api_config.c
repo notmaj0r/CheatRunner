@@ -26,7 +26,12 @@ handle_api_config(int fd) {
            "\"allow_legacy_mc4_without_expected\":%d,\"allow_legacy_shn_without_expected\":%d,"
            "\"cheat_mc4_unverified_fallback\":\"%s\",\"cheat_shn_unverified_fallback\":\"%s\","
            "\"cheat_min_stable_ms\":%d,\"cheat_apply_cooldown_ms\":%d,"
-           "\"cheat_codecave_fallback\":%d,\"cheat_master_code_fixup\":%d}",
+           "\"cheat_codecave_fallback\":%d,\"cheat_master_code_fixup\":%d,"
+           "\"cheat_addr_cache_enabled\":%d,\"cheat_inter_mod_delay_ms\":%d,"
+           "\"allow_unsafe_mc4_apply\":%d,\"allow_unsafe_shn_apply\":%d,"
+           "\"cheat_log_candidates\":%d,\"cheat_mark_crash_suspect\":%d,"
+           "\"cheat_apply_one_at_a_time\":%d,"
+           "\"cheat_address_auto_detect\":%d}",
            g_cfg.http_port, g_cfg.auto_load_cheat_menu,
            g_cfg.auto_download_missing_cheat, g_cfg.launch_kill_current, g_cfg.launch_kill_delay_ms,
            g_cfg.launch_wait_timeout_ms, g_cfg.cheat_engine, g_cfg.cheat_validate_original_bytes,
@@ -41,7 +46,12 @@ handle_api_config(int fd) {
            g_cfg.allow_legacy_mc4_without_expected, g_cfg.allow_legacy_shn_without_expected,
            g_cfg.cheat_mc4_unverified_fallback, g_cfg.cheat_shn_unverified_fallback,
            g_cfg.cheat_min_stable_ms, g_cfg.cheat_apply_cooldown_ms,
-           g_cfg.cheat_codecave_fallback, g_cfg.cheat_master_code_fixup);
+           g_cfg.cheat_codecave_fallback, g_cfg.cheat_master_code_fixup,
+           g_cfg.cheat_addr_cache_enabled, g_cfg.cheat_inter_mod_delay_ms,
+           g_cfg.allow_unsafe_mc4_apply, g_cfg.allow_unsafe_shn_apply,
+           g_cfg.cheat_log_candidates, g_cfg.cheat_mark_crash_suspect,
+           g_cfg.cheat_apply_one_at_a_time,
+           g_cfg.cheat_address_auto_detect);
   pthread_mutex_unlock(&g_cfg_lock);
   http_send_json(fd, 200, body);
 }
@@ -168,6 +178,23 @@ handle_api_config_set(int fd, const char *query) {
     g_cfg.cheat_codecave_fallback = atoi(value) ? 1 : 0;
   } else if (!strcmp(key, "cheat_master_code_fixup")) {
     g_cfg.cheat_master_code_fixup = atoi(value) ? 1 : 0;
+  } else if (!strcmp(key, "cheat_addr_cache_enabled")) {
+    g_cfg.cheat_addr_cache_enabled = atoi(value) ? 1 : 0;
+  } else if (!strcmp(key, "cheat_inter_mod_delay_ms")) {
+    int v = atoi(value);
+    g_cfg.cheat_inter_mod_delay_ms = (v >= 0 && v <= 10000) ? v : 0;
+  } else if (!strcmp(key, "cheat_address_auto_detect")) {
+    g_cfg.cheat_address_auto_detect = atoi(value) ? 1 : 0;
+  } else if (!strcmp(key, "cheat_validate_original_bytes")) {
+    g_cfg.cheat_validate_original_bytes = atoi(value) ? 1 : 0;
+  } else if (!strcmp(key, "allow_unsafe_mc4_apply")) {
+    g_cfg.allow_unsafe_mc4_apply = atoi(value) ? 1 : 0;
+  } else if (!strcmp(key, "allow_unsafe_shn_apply")) {
+    g_cfg.allow_unsafe_shn_apply = atoi(value) ? 1 : 0;
+  } else if (!strcmp(key, "cheat_log_candidates")) {
+    g_cfg.cheat_log_candidates = atoi(value) ? 1 : 0;
+  } else if (!strcmp(key, "cheat_apply_one_at_a_time")) {
+    g_cfg.cheat_apply_one_at_a_time = atoi(value) ? 1 : 0;
   } else if (!strncmp(key, "hotkey_", 7)) {
     /* removed — silently ignore */
     (void)value;
@@ -179,5 +206,72 @@ handle_api_config_set(int fd, const char *query) {
   int rc = config_save_locked();
   pthread_mutex_unlock(&g_cfg_lock);
   cr_log("info", "config", "config changed: %s=%s", key, value);
+  http_send_json(fd, rc == 0 ? 200 : 500, rc == 0 ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"save failed\"}");
+}
+
+/* Reset all settings to their defaults. The live HTTP port is preserved so the
+ * connection the user is on doesn't move out from under them. */
+void
+handle_api_config_reset(int fd) {
+  pthread_mutex_lock(&g_cfg_lock);
+  int keep_port = g_cfg.http_port;
+  config_set_defaults(&g_cfg);
+  g_cfg.http_port = keep_port;
+  cr_log_set_level(g_cfg.log_level);
+  int rc = config_save_locked();
+  pthread_mutex_unlock(&g_cfg_lock);
+  cr_log("info", "config", "config reset to defaults (port preserved=%d)", keep_port);
+  http_send_json(fd, rc == 0 ? 200 : 500, rc == 0 ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"save failed\"}");
+}
+
+/* Apply a curated bundle of related settings in one click.
+ *   safe   — validation on, unsafe applies off, relative fallback (default-ish)
+ *   compat — maximum compatibility: allow unverified/unsafe applies for stubborn cheats
+ *   debug  — verbose logging + candidate diagnostics */
+void
+handle_api_config_preset(int fd, const char *query) {
+  char name[32] = {0};
+  if (query_value(query, "name", name, sizeof(name)) != 0) {
+    http_send_json(fd, 400, "{\"ok\":false,\"error\":\"missing name\"}");
+    return;
+  }
+  pthread_mutex_lock(&g_cfg_lock);
+  if (!strcmp(name, "safe")) {
+    g_cfg.cheat_validate_original_bytes = 1;
+    g_cfg.allow_legacy_mc4_without_expected = 0;
+    g_cfg.allow_legacy_shn_without_expected = 0;
+    g_cfg.allow_unsafe_mc4_apply = 0;
+    g_cfg.allow_unsafe_shn_apply = 0;
+    g_cfg.cheat_address_auto_detect = 1;
+    g_cfg.cheat_codecave_fallback = 1;
+    g_cfg.cheat_master_code_fixup = 1;
+    g_cfg.cheat_log_candidates = 0;
+    snprintf(g_cfg.cheat_mc4_unverified_fallback, sizeof(g_cfg.cheat_mc4_unverified_fallback), "%s", "relative");
+    snprintf(g_cfg.cheat_shn_unverified_fallback, sizeof(g_cfg.cheat_shn_unverified_fallback), "%s", "relative");
+    snprintf(g_cfg.log_level, sizeof(g_cfg.log_level), "%s", "info");
+  } else if (!strcmp(name, "compat")) {
+    g_cfg.cheat_validate_original_bytes = 1;
+    g_cfg.allow_legacy_mc4_without_expected = 1;
+    g_cfg.allow_legacy_shn_without_expected = 1;
+    g_cfg.allow_unsafe_mc4_apply = 1;
+    g_cfg.allow_unsafe_shn_apply = 1;
+    g_cfg.cheat_address_auto_detect = 1;
+    g_cfg.cheat_codecave_fallback = 1;
+    g_cfg.cheat_master_code_fixup = 1;
+    snprintf(g_cfg.cheat_mc4_unverified_fallback, sizeof(g_cfg.cheat_mc4_unverified_fallback), "%s", "relative");
+    snprintf(g_cfg.cheat_shn_unverified_fallback, sizeof(g_cfg.cheat_shn_unverified_fallback), "%s", "relative");
+    snprintf(g_cfg.log_level, sizeof(g_cfg.log_level), "%s", "info");
+  } else if (!strcmp(name, "debug")) {
+    g_cfg.cheat_log_candidates = 1;
+    snprintf(g_cfg.log_level, sizeof(g_cfg.log_level), "%s", "debug");
+  } else {
+    pthread_mutex_unlock(&g_cfg_lock);
+    http_send_json(fd, 400, "{\"ok\":false,\"error\":\"unknown preset\"}");
+    return;
+  }
+  cr_log_set_level(g_cfg.log_level);
+  int rc = config_save_locked();
+  pthread_mutex_unlock(&g_cfg_lock);
+  cr_log("info", "config", "preset applied: %s", name);
   http_send_json(fd, rc == 0 ? 200 : 500, rc == 0 ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"save failed\"}");
 }

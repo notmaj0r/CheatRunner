@@ -2,9 +2,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "http_client.h"
+#include "cr_dns.h"
 
 typedef struct http_ctx {
   int libnet_mem_id;
@@ -40,6 +42,7 @@ int sceHttpGetResponseContentLength(int req_id, int *known, uint64_t *content_le
 int sceHttpGetStatusCode(int req_id, int *status_code);
 int sceHttpReadData(int req_id, void *data, size_t size);
 int sceHttpDeleteRequest(int req_id);
+int sceHttpAddRequestHeader(int req_id, const char *name, const char *value, unsigned int mode);
 
 static int
 http_ssl_cb(void) {
@@ -68,13 +71,13 @@ http_init(http_ctx_t *ctx, const char *agent, const char *url, int timeout_ms) {
   if ((err = sceNetInit()) < 0) {
     return err;
   }
-  if ((ctx->libnet_mem_id = sceNetPoolCreate("cheatrunner_http", 16 * 1024, 0)) < 0) {
+  if ((ctx->libnet_mem_id = sceNetPoolCreate("cheatrunner_http", 512 * 1024, 0)) < 0) {
     return ctx->libnet_mem_id;
   }
-  if ((ctx->libssl_ctx_id = sceSslInit(128 * 1024)) < 0) {
+  if ((ctx->libssl_ctx_id = sceSslInit(384 * 1024)) < 0) {
     return ctx->libssl_ctx_id;
   }
-  if ((ctx->libhttp_ctx_id = sceHttpInit(ctx->libnet_mem_id, ctx->libssl_ctx_id, 32 * 1024)) < 0) {
+  if ((ctx->libhttp_ctx_id = sceHttpInit(ctx->libnet_mem_id, ctx->libssl_ctx_id, 256 * 1024)) < 0) {
     return ctx->libhttp_ctx_id;
   }
   if ((ctx->tmpl_id = sceHttpCreateTemplate(ctx->libhttp_ctx_id, agent, 2, 1)) < 0) {
@@ -86,14 +89,68 @@ http_init(http_ctx_t *ctx, const char *agent, const char *url, int timeout_ms) {
   if ((err = sceHttpsSetSslCallback(ctx->tmpl_id, http_ssl_cb, 0)) < 0) {
     return err;
   }
+  /* DNS bypass: resolve hostname via 8.8.8.8 to work around PS5 DNS = 127.0.0.1.
+   * Substitute the resolved IP into the URL; set Host header so the server
+   * routes correctly. The ssl_cb returning 0 suppresses any SNI/cert mismatch. */
+  char resolved_url[1024];
+  char orig_host[256];
+  orig_host[0] = '\0';
+  {
+    const char *scheme_end = strstr(url, "://");
+    if (scheme_end) {
+      scheme_end += 3;
+      const char *host_end = scheme_end;
+      while (*host_end && *host_end != '/' && *host_end != ':' && *host_end != '?')
+        host_end++;
+      size_t host_len = (size_t)(host_end - scheme_end);
+      if (host_len > 0 && host_len < sizeof(orig_host)) {
+        memcpy(orig_host, scheme_end, host_len);
+        orig_host[host_len] = '\0';
+        /* Only resolve if it looks like a hostname (not already an IP) */
+        int already_ip = 1;
+        for (size_t _i = 0; _i < host_len; _i++) {
+          char c = orig_host[_i];
+          if (c != '.' && (c < '0' || c > '9')) { already_ip = 0; break; }
+        }
+        if (!already_ip) {
+          char ip[64] = {0};
+          if (cr_dns_resolve(orig_host, ip, sizeof(ip)) == 0 && ip[0]) {
+            size_t scheme_len = (size_t)(scheme_end - url);
+            snprintf(resolved_url, sizeof(resolved_url), "%.*s%s%s",
+                     (int)scheme_len, url, ip, host_end);
+            url = resolved_url;
+          } else {
+            orig_host[0] = '\0'; /* resolution failed — use original URL */
+          }
+        } else {
+          orig_host[0] = '\0';
+        }
+      }
+    }
+  }
   if ((ctx->conn_id = sceHttpCreateConnectionWithURL(ctx->tmpl_id, url, 0)) < 0) {
     return ctx->conn_id;
   }
   if ((ctx->req_id = sceHttpCreateRequestWithURL(ctx->conn_id, 0, url, 0)) < 0) {
     return ctx->req_id;
   }
+  /* Restore original Host header so HTTP/1.1 routing and server-side SNI work */
+  if (orig_host[0]) {
+    (void)sceHttpAddRequestHeader(ctx->req_id, "Host", orig_host, 0);
+  }
   if (timeout_ms > 0) {
     unsigned int t_us = (unsigned int)timeout_ms * 1000u;
+    /* Set timeouts at all levels: template → connection → request.
+     * Some sceHttp versions only honour the timeout when set at the connection
+     * or template level; setting all three ensures at least one takes effect. */
+    (void)sceHttpSetConnectTimeOut(ctx->tmpl_id, t_us);
+    (void)sceHttpSetResolveTimeOut(ctx->tmpl_id, t_us);
+    (void)sceHttpSetSendTimeOut(ctx->tmpl_id, t_us);
+    (void)sceHttpSetRecvTimeOut(ctx->tmpl_id, t_us);
+    (void)sceHttpSetConnectTimeOut(ctx->conn_id, t_us);
+    (void)sceHttpSetResolveTimeOut(ctx->conn_id, t_us);
+    (void)sceHttpSetSendTimeOut(ctx->conn_id, t_us);
+    (void)sceHttpSetRecvTimeOut(ctx->conn_id, t_us);
     (void)sceHttpSetConnectTimeOut(ctx->req_id, t_us);
     (void)sceHttpSetResolveTimeOut(ctx->req_id, t_us);
     (void)sceHttpSetSendTimeOut(ctx->req_id, t_us);
@@ -238,8 +295,8 @@ http_get_url_ex_timeout(const char *agent, const char *url, size_t max_bytes, in
   int status = -1;
   int rc = 0;
   int init_rc = 0;
-  int attempts = 3;
-  int effective_timeout_ms = timeout_ms > 0 ? timeout_ms : 15000;
+  int attempts = 2;
+  int effective_timeout_ms = timeout_ms > 0 ? timeout_ms : 8000;
 
   if (!url || !data_out || !len_out) {
     return -1;
@@ -261,9 +318,13 @@ http_get_url_ex_timeout(const char *agent, const char *url, size_t max_bytes, in
     rc = -1;
 
     init_rc = http_init(&ctx, agent, url, effective_timeout_ms);
-    if (init_rc >= 0) {
-      rc = http_request(&ctx, &body, &body_len, &status, max_bytes);
+    if (init_rc < 0) {
+      /* Init failure is structural (pool alloc, SSL init, DNS) — retrying won't help. */
+      http_fini(&ctx);
+      rc = init_rc;
+      break;
     }
+    rc = http_request(&ctx, &body, &body_len, &status, max_bytes);
     http_fini(&ctx);
 
     if (!http_should_retry(rc, status) || attempt == attempts - 1) {

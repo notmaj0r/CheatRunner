@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.10)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 project(CheatRunnerPayload C)
-set(CHEATRUNNER_VERSION "0.11")
+set(CHEATRUNNER_VERSION "0.12")
 
 # Embed CheatRunner.png as a C byte array (cheatrunner_png.h in build dir).
 # If the asset is missing, generate a tiny fallback icon so builds still work.

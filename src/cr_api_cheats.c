@@ -128,5 +128,34 @@ cr_api_cheats_handle(int fd, const char *method, const char *path,
     handle_api_cheats_select_auto(fd, query);
     return 1;
   }
+  /* /api/cr/eboot?titleId=<id>[&force=1] — dump decrypted ELF from running game memory */
+  if (!strcmp(path, "/api/cr/eboot")) {
+    handle_api_cr_eboot(fd, query);
+    return 1;
+  }
+  /* /api/cr/eboot/delete?titleId=<id> — delete cached eboot dump */
+  if (!strcmp(path, "/api/cr/eboot/delete")) {
+    handle_api_cr_eboot_delete(fd, query);
+    return 1;
+  }
+  /* /api/cheats/disable-all?titleId=<id> — revert all active cheats for running game */
+  if (!strcmp(path, "/api/cheats/disable-all")) {
+    handle_api_cheats_disable_all(fd, query);
+    return 1;
+  }
+  if (!strcmp(path, "/api/title-prefs")) {
+    handle_api_title_prefs_get(fd, query);
+    return 1;
+  }
+  if (!strcmp(path, "/api/title-prefs/set")) {
+    if (!is_post) { http_send_json(fd, 405, "{\"ok\":false,\"error\":\"method_not_allowed\"}"); return 1; }
+    handle_api_title_prefs_set(fd, query);
+    return 1;
+  }
+  if (!strcmp(path, "/api/title-prefs/clear")) {
+    if (!is_post) { http_send_json(fd, 405, "{\"ok\":false,\"error\":\"method_not_allowed\"}"); return 1; }
+    handle_api_title_prefs_clear(fd, query);
+    return 1;
+  }
   return 0;
 }

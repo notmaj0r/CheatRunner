@@ -132,6 +132,12 @@ collect_games(game_entry_t *entries, size_t *count) {
 }
 
 #if CHEATRUNNER_HAVE_SQLITE_APPDB
+/* SQLite is compiled with SQLITE_THREADSAFE=0 — no internal locking at all.
+ * Concurrent sqlite3_* calls from multiple threads (even on separate connections)
+ * corrupt shared library state and crash. All SQLite entry points must hold
+ * this mutex. */
+static pthread_mutex_t g_sqlite_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static int
 appdb_table_exists(sqlite3 *db, const char *table) {
   sqlite3_stmt *st = NULL;
@@ -233,11 +239,13 @@ appdb_collect_games_sqlite(game_entry_t *entries, size_t *count) {
   const char *sql = NULL;
   int rc = -1;
 
+  pthread_mutex_lock(&g_sqlite_lock);
   if (sqlite3_open_v2("/system_data/priv/mms/app.db", &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
     cr_log("debug", "appdb", "sqlite3_open failed: %s", db ? sqlite3_errmsg(db) : "alloc failed");
     if (db) {
       sqlite3_close(db);
     }
+    pthread_mutex_unlock(&g_sqlite_lock);
     return -1;
   }
   sqlite3_busy_timeout(db, 3000);
@@ -390,6 +398,7 @@ done:
   if (db) {
     sqlite3_close(db);
   }
+  pthread_mutex_unlock(&g_sqlite_lock);
   return rc;
 }
 #else
@@ -477,18 +486,22 @@ static int
 appdb_resolve_icon_path(const char *title_id, char *out, size_t out_size) {
   sqlite3 *db = NULL;
   int rc = 0;
+  pthread_mutex_lock(&g_sqlite_lock);
   if (sqlite3_open_v2("/system_data/priv/mms/app.db", &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
     if (db) sqlite3_close(db);
+    pthread_mutex_unlock(&g_sqlite_lock);
     return 0;
   }
   if (!appdb_table_has_column(db, "tbl_contentinfo", "icon0Info")) {
     sqlite3_close(db);
+    pthread_mutex_unlock(&g_sqlite_lock);
     return 0;
   }
   sqlite3_stmt *st = NULL;
   const char *sql = "SELECT icon0Info FROM tbl_contentinfo WHERE titleId=?1 AND icon0Info IS NOT NULL AND icon0Info!='' LIMIT 1;";
   if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
     sqlite3_close(db);
+    pthread_mutex_unlock(&g_sqlite_lock);
     return 0;
   }
   sqlite3_bind_text(st, 1, title_id, -1, NULL);
@@ -514,6 +527,7 @@ appdb_resolve_icon_path(const char *title_id, char *out, size_t out_size) {
   }
   sqlite3_finalize(st);
   sqlite3_close(db);
+  pthread_mutex_unlock(&g_sqlite_lock);
   return rc;
 }
 #endif

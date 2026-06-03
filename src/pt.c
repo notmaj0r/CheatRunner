@@ -15,6 +15,7 @@ along with this program; see the file COPYING. If not, see
 <http://www.gnu.org/licenses/>.  */
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <string.h>
 #include <stdio.h>
@@ -31,8 +32,34 @@ along with this program; see the file COPYING. If not, see
 #include "pt.h"
 
 
+/* sys_ptrace temporarily elevates THIS process's ucred (authid + caps) for the
+ * duration of one ptrace syscall, then restores it.  Those fields are
+ * process-wide, so two threads doing this concurrently corrupt each other:
+ * thread B can save thread A's already-elevated caps as its "baseline" and then
+ * restore the process to a permanently-privileged state, while thread A's
+ * mid-flight restore drops privileges out from under B's syscall (intermittent
+ * EPERM ptrace failures).  CheatRunner calls ptrace from the apply thread, the
+ * game-monitor thread (patch restore), and HTTP handler threads, so this must be
+ * serialized.  A single static mutex around the save/elevate/syscall/restore is
+ * sufficient and cheap — ptrace operations are not on any hot path. */
+static pthread_mutex_t g_ptrace_ucred_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Per-thread batch-elevation state (see pt_batch_begin). When depth>0 this thread
+ * has already raised its ucred and holds g_ptrace_ucred_lock, so sys_ptrace skips
+ * the per-call swap entirely. */
+static __thread int      g_pt_batch_depth  = 0;
+static __thread uint64_t g_pt_batch_authid = 0;
+static __thread uint8_t  g_pt_batch_caps[16];
+
 static int
 sys_ptrace(int request, pid_t pid, caddr_t addr, int data) {
+  /* Inside an open batch on this thread: ucred is already elevated and the ucred
+   * lock is already held by us — just issue the syscall (the expensive path is the
+   * 4 kernel credential ops, not the syscall itself). */
+  if (g_pt_batch_depth > 0) {
+    return (int)syscall(SYS_ptrace, request, pid, addr, data);
+  }
+
   uint8_t privcaps[16] = {0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
                           0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff};
   pid_t mypid = getpid();
@@ -40,30 +67,81 @@ sys_ptrace(int request, pid_t pid, caddr_t addr, int data) {
   uint64_t authid;
   int ret;
 
+  pthread_mutex_lock(&g_ptrace_ucred_lock);
+
   if(!(authid=kernel_get_ucred_authid(mypid))) {
+    pthread_mutex_unlock(&g_ptrace_ucred_lock);
     return -1;
   }
   if(kernel_get_ucred_caps(mypid, caps)) {
+    pthread_mutex_unlock(&g_ptrace_ucred_lock);
     return -1;
   }
 
   if(kernel_set_ucred_authid(mypid, 0x4800000000010003l)) {
+    pthread_mutex_unlock(&g_ptrace_ucred_lock);
     return -1;
   }
   if(kernel_set_ucred_caps(mypid, privcaps)) {
+    /* authid was already elevated — restore it before bailing out. */
+    kernel_set_ucred_authid(mypid, authid);
+    pthread_mutex_unlock(&g_ptrace_ucred_lock);
     return -1;
   }
 
   ret = (int)syscall(SYS_ptrace, request, pid, addr, data);
 
-  if(kernel_set_ucred_authid(mypid, authid)) {
-    return -1;
-  }
-  if(kernel_set_ucred_caps(mypid, caps)) {
-    return -1;
-  }
+  /* Restore both fields unconditionally — early return on the first failure
+   * would leave the process with elevated privcaps permanently. */
+  kernel_set_ucred_authid(mypid, authid);
+  kernel_set_ucred_caps(mypid, caps);
+
+  pthread_mutex_unlock(&g_ptrace_ucred_lock);
 
   return ret;
+}
+
+
+int
+pt_batch_begin(void) {
+  if (g_pt_batch_depth > 0) {     /* already elevated on this thread — nest */
+    g_pt_batch_depth++;
+    return 0;
+  }
+  uint8_t privcaps[16] = {0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+                          0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff};
+  pid_t mypid = getpid();
+
+  pthread_mutex_lock(&g_ptrace_ucred_lock);
+  if(!(g_pt_batch_authid = kernel_get_ucred_authid(mypid)) ||
+     kernel_get_ucred_caps(mypid, g_pt_batch_caps) ||
+     kernel_set_ucred_authid(mypid, 0x4800000000010003l) ||
+     kernel_set_ucred_caps(mypid, privcaps)) {
+    /* Elevation failed — restore authid (in case it was raised) and bail.
+     * Callers fall back to the per-call swap path automatically. */
+    if(g_pt_batch_authid) {
+      kernel_set_ucred_authid(mypid, g_pt_batch_authid);
+    }
+    pthread_mutex_unlock(&g_ptrace_ucred_lock);
+    return -1;
+  }
+  g_pt_batch_depth = 1;           /* lock stays held until pt_batch_end */
+  return 0;
+}
+
+
+void
+pt_batch_end(void) {
+  if (g_pt_batch_depth <= 0) {
+    return;
+  }
+  if (--g_pt_batch_depth > 0) {   /* still nested */
+    return;
+  }
+  pid_t mypid = getpid();
+  kernel_set_ucred_authid(mypid, g_pt_batch_authid);
+  kernel_set_ucred_caps(mypid, g_pt_batch_caps);
+  pthread_mutex_unlock(&g_ptrace_ucred_lock);
 }
 
 
@@ -346,12 +424,22 @@ pt_call(pid_t pid, intptr_t addr, ...) {
     return -1;
   }
 
-  // single step until the function returns
+  /* Single-step until the injected function returns.
+   * Limit to PT_STEP_MAX iterations — a blocked or looping target would
+   * otherwise hang CheatRunner forever with the game frozen in STOP state. */
+#define PT_STEP_MAX 1000000
+  int pt_steps = 0;
   while(jmp_reg.r_rsp <= bak_reg.r_rsp) {
+    if(++pt_steps > PT_STEP_MAX) {
+      pt_setregs(pid, &bak_reg);
+      return -1;
+    }
     if(pt_step(pid)) {
+      pt_setregs(pid, &bak_reg);
       return -1;
     }
     if(pt_getregs(pid, &jmp_reg)) {
+      pt_setregs(pid, &bak_reg);
       return -1;
     }
   }
@@ -399,12 +487,18 @@ pt_syscall(pid_t pid, int sysno, ...) {
     return -1;
   }
 
-  // single step until the function returns
+  int pt_steps2 = 0;
   while(jmp_reg.r_rsp <= bak_reg.r_rsp) {
+    if(++pt_steps2 > PT_STEP_MAX) {
+      pt_setregs(pid, &bak_reg);
+      return -1;
+    }
     if(pt_step(pid)) {
+      pt_setregs(pid, &bak_reg);
       return -1;
     }
     if(pt_getregs(pid, &jmp_reg)) {
+      pt_setregs(pid, &bak_reg);
       return -1;
     }
   }
@@ -498,11 +592,8 @@ pt_perror(pid_t pid, const char *s) {
   intptr_t faddr = pt_resolve(pid, "9BcDykPmo1I");
   intptr_t addr = pt_call(pid, faddr);
   int err = pt_getint(pid, addr);
-  char buf[255];
-
-  strcpy(buf, s);
-  strcat(buf, ": ");
-  strcat(buf, strerror(err));
+  char buf[512];
+  snprintf(buf, sizeof(buf), "%s: %s", s, strerror(err));
   puts(buf);
 }
 

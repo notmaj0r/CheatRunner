@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -17,6 +18,10 @@
 #include "cr_notifications.h"
 #include "cr_paths.h"
 #include "cr_shutdown.h"
+#include "cr_cheats.h"
+#include "cr_addr_cache.h"
+#include "cr_title_prefs.h"
+#include "cr_favorites.h"
 
 #ifndef CHEATRUNNER_VERSION
 #define CHEATRUNNER_VERSION "0.1"
@@ -28,10 +33,8 @@ main(void) {
   signal(SIGPIPE, SIG_IGN);
 
   syscall(SYS_thr_set_name, -1, "CheatRunner.elf");
-  while ((old_pid = find_pid_by_name("CheatRunner.elf")) > 0) {
-    kill(old_pid, SIGKILL);
-    sleep(1);
-  }
+
+  cr_log_klog_banner();
 
   puts(".------------------------------------.");
   puts("|            CheatRunner             |");
@@ -59,6 +62,30 @@ main(void) {
   }
 #endif
 
+  /* Kill any previous CheatRunner instance before binding the HTTP port.
+   *
+   * This MUST run AFTER jb_escalate_pid/cr_priv_init: a previously-running
+   * CheatRunner has escalated itself (uid 0 + a privileged authid), and an
+   * un-escalated newcomer cannot SIGKILL it — kill() returns EPERM, the old
+   * process keeps listening on the HTTP port, and our bind() then fails with
+   * EADDRINUSE forever. With privileges in hand the kill actually lands.
+   *
+   * Bounded SIGKILL-then-verify loop: a SIGKILL'd process lingers as a ZOMBIE
+   * in the process list until reaped, so an unbounded `while (find_pid > 0)`
+   * could spin forever. Cap the wait at ~6s. We re-issue the signal each spin
+   * and log if the target refuses to die so the cause is visible in the log
+   * instead of surfacing only as a flood of bind() failures later. */
+  for (int spin = 0; spin < 60; spin++) {
+    old_pid = find_pid_by_name("CheatRunner.elf");
+    if (old_pid <= 0) {
+      break;
+    }
+    if (kill(old_pid, SIGKILL) != 0 && spin == 0) {
+      cr_log("warn", "boot", "could not signal previous instance pid=%d errno=%d", old_pid, errno);
+    }
+    usleep(100 * 1000);
+  }
+
   {
     int urc = sceUserServiceInitialize(NULL);
     if (urc != 0 && urc != (int)0x80960003) {
@@ -70,6 +97,10 @@ main(void) {
   config_load();
   notifications_load();
   activity_load();
+  crash_suspects_load();
+  addr_cache_load();
+  title_prefs_load();
+  favorites_load();
   rpc_refresh_title_and_notify();
   set_launch_status_ex(0, "idle", "", "ready", 1, "", 0, 0);
   notify("CheatRunner v" CHEATRUNNER_VERSION " by maj0r");

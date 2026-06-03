@@ -3,8 +3,45 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/syscall.h>
 #include <time.h>
+#include <unistd.h>
 #include "cr_log.h"
+
+/* Write to klogsrv via sendsyslog (syscall 0x259).
+ * klogsrv reads /dev/klog which receives messages written via this syscall.
+ * The <118> prefix is syslog priority (facility=kernel, severity=info). */
+static void
+klog_raw(const char *buf) {
+  syscall(0x259, 7, buf, 0);
+}
+
+void
+cr_log_klog_banner(void) {
+  static const char * const lines[] = {
+    "<118>[CheatRunner] \n",
+    "<118>[CheatRunner]    ____ _                _   ____                              \n",
+    "<118>[CheatRunner]   / ___| |__   ___  __ _| |_|  _ \\ _   _ _ __  _ __   ___ _ __ \n",
+    "<118>[CheatRunner]  | |   | '_ \\ / _ \\/ _` | __| |_) | | | | '_ \\| '_ \\ / _ \\ '__|\n",
+    "<118>[CheatRunner]  | |___| | | |  __/ (_| | |_|  _ <| |_| | | | | | | |  __/ |   \n",
+    "<118>[CheatRunner]   \\____|_| |_|\\___|\\__,_|\\__|_| \\_\\\\__,_|_| |_|_| |_|\\___|_|   \n",
+    "<118>[CheatRunner] \n",
+    NULL
+  };
+  for (int i = 0; lines[i]; i++) {
+    klog_raw(lines[i]);
+  }
+}
+
+static void
+klog_send(const char *level, const char *tag, const char *msg) {
+  char buf[640];
+  int n = snprintf(buf, sizeof(buf), "<118>[CheatRunner] [%s] [%s] %s\n",
+                   level ? level : "info", tag ? tag : "core", msg ? msg : "");
+  if (n > 0) {
+    klog_raw(buf);
+  }
+}
 
 pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
 log_entry_t     g_logs[MAX_LOG_ENTRIES];
@@ -101,6 +138,7 @@ cr_log(const char *level, const char *tag, const char *fmt, ...) {
   va_end(args);
   printf("[%s] %s\n", tag ? tag : "core", buf);
   log_push(level, tag, buf);
+  klog_send(level, tag, buf);
 }
 
 void
@@ -115,4 +153,5 @@ log_msg(const char *fmt, ...) {
   va_end(args);
   printf("%s\n", buf);
   log_push("info", "core", buf);
+  klog_send("info", "core", buf);
 }

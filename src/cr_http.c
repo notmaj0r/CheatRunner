@@ -24,7 +24,7 @@ static volatile int g_http_listen_notified = 0;
 char g_listen_ip[64] = "127.0.0.1";
 int g_http_listen_fd = -1;
 
-#define HTTP_MAX_CONCURRENT 16
+#define HTTP_MAX_CONCURRENT 24
 static volatile int  g_active_clients = 0;
 static volatile long long g_too_many_requests_count = 0;
 static pthread_mutex_t g_active_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -205,7 +205,8 @@ http_handle_client(int fd, const char *client_ip) {
   body_ptr = headers_end + sep_len;
   size_t already_body = off > (header_bytes + sep_len) ? (off - (header_bytes + sep_len)) : 0;
   size_t content_len = parse_content_length_header(req);
-  if (content_len > MAX_REQ_SIZE - (header_bytes + sep_len) - 1) {
+  size_t used = header_bytes + sep_len;
+  if (used >= MAX_REQ_SIZE || content_len > MAX_REQ_SIZE - used - 1) {
     http_send_json(fd, 413, "{\"ok\":false,\"error\":\"payload_too_large\"}");
     free(req);
     return;
@@ -282,6 +283,7 @@ void *
 http_server_thread(void *arg) {
   (void)arg;
   int http_port = CHEATRUNNER_HTTP_PORT;
+  int bind_fails = 0;
   pthread_mutex_lock(&g_cfg_lock);
   http_port = g_cfg.http_port;
   pthread_mutex_unlock(&g_cfg_lock);
@@ -306,15 +308,32 @@ http_server_thread(void *arg) {
     addr.sin_port = htons(http_port);
 
     if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-      log_msg("[HTTP] bind() failed: %d", errno);
-      notify("CheatRunner HTTP bind failed on %d", http_port);
+      int be = errno;
       close(listen_fd);
+      bind_fails++;
+      /* EADDRINUSE (FreeBSD errno 48) almost always means a previous CheatRunner
+       * is still listening on this port (SO_REUSEADDR only reclaims dead TIME_WAIT
+       * sockets, not a live listener). Surface that clearly once, then back off so
+       * the log/toast isn't flooded — but keep retrying so we recover on our own if
+       * the port frees up (e.g. the old instance finally exits). */
+      if (bind_fails <= 5) {
+        log_msg("[HTTP] bind() failed on %d: %d", http_port, be);
+      }
+      if (bind_fails == 5) {
+        if (be == EADDRINUSE) {
+          log_msg("[HTTP] port %d still in use after retries — is a previous CheatRunner running? Reboot the PS5 or close it.", http_port);
+          notify("CheatRunner: port %d busy — a previous instance is still running. Reboot the PS5.", http_port);
+        } else {
+          notify("CheatRunner HTTP bind failed on %d (errno %d)", http_port, be);
+        }
+      }
       if (g_shutdown_requested) {
         break;
       }
-      sleep(3);
+      sleep(bind_fails < 5 ? 3 : 10);
       continue;
     }
+    bind_fails = 0;
     if (listen(listen_fd, 8) != 0) {
       log_msg("[HTTP] listen() failed: %d", errno);
       notify("CheatRunner HTTP listen failed on %d", http_port);
@@ -327,14 +346,15 @@ http_server_thread(void *arg) {
     }
     g_http_listen_fd = listen_fd;
 
-    log_msg("[HTTP] listening on :%d", http_port);
-    if (!g_http_listen_notified) {
+    {
       char ip[64] = "127.0.0.1";
       local_ip(ip, sizeof(ip));
       snprintf(g_listen_ip, sizeof(g_listen_ip), "%s", ip);
-      notify("Listening on: %s:%d", ip, http_port);
       log_msg("Listening on: %s:%d", ip, http_port);
-      g_http_listen_notified = 1;
+      if (!g_http_listen_notified) {
+        notify("Listening on: %s:%d", ip, http_port);
+        g_http_listen_notified = 1;
+      }
     }
 
     while (!g_shutdown_requested) {
@@ -348,9 +368,10 @@ http_server_thread(void *arg) {
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
           continue;
         }
-        log_msg("[HTTP] accept() failed: %d", errno);
-        sleep(1);
-        continue;
+        /* Non-transient error (e.g. network dropped during sleep mode) —
+         * break to outer loop so the socket is closed and recreated. */
+        log_msg("[HTTP] accept() failed: %d — reopening socket", errno);
+        break;
       }
       char client_ip[64] = {0};
       inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));

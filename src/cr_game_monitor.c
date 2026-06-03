@@ -1,16 +1,20 @@
+#include <errno.h>
 #include <signal.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <sys/sysctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <ps5/kernel.h>
 
+#include "cr_addr_cache.h"
 #include "cr_cheats.h"
+#include "cr_launch.h"
+#include "cr_patch_parser.h"
 #include "cr_config.h"
 #include "cr_activity.h"
 #include "cr_game_monitor.h"
@@ -26,6 +30,9 @@ static char g_current_title[32] = "No game running";
 static pthread_mutex_t g_running_lock = PTHREAD_MUTEX_INITIALIZER;
 static running_game_state_t g_running = {0};
 volatile int g_game_monitor_running = 1;
+
+static struct { char title_id[16]; pid_t pid; } g_ver_warn_last = {0};
+static pthread_mutex_t g_ver_warn_lock = PTHREAD_MUTEX_INITIALIZER;
 
 pid_t
 find_pid_by_name(const char *name) {
@@ -49,6 +56,11 @@ find_pid_by_name(const char *name) {
 
   for (uint8_t *ptr = buf; ptr < (buf + buf_size);) {
     int ki_structsize = *(int *)ptr;
+    if (ki_structsize <= 0 || (size_t)ki_structsize > (size_t)((buf + buf_size) - ptr)) break;
+    /* ki_pid is at +72 and ki_tdname (a NUL-terminated name array) at +447. Skip
+     * any record too short to contain those fields rather than read into the next
+     * record — or past the buffer end on the final record. */
+    if (ki_structsize <= 467) { ptr += ki_structsize; continue; }
     pid_t ki_pid = *(pid_t *)&ptr[72];
     char *ki_tdname = (char *)&ptr[447];
     ptr += ki_structsize;
@@ -80,6 +92,8 @@ find_pid_for_app_id(uint32_t app_id) {
   app_info_t info;
   for (uint8_t *ptr = buf; ptr < (buf + buf_size);) {
     int ki_structsize = *(int *)ptr;
+    if (ki_structsize <= 0 || (size_t)ki_structsize > (size_t)((buf + buf_size) - ptr)) break;
+    if (ki_structsize <= 76) { ptr += ki_structsize; continue; }  /* ki_pid at +72 */
     pid_t pid = *(pid_t *)&ptr[72];
     ptr += ki_structsize;
     memset(&info, 0, sizeof(info));
@@ -102,16 +116,27 @@ get_running_game_ex(pid_t *out_pid, char *out_title, size_t title_size, intptr_t
   if (pid <= 0) {
     return -1;
   }
-  app_info_t info;
-  memset(&info, 0, sizeof(info));
-  if (sceKernelGetAppInfo(pid, &info) != 0 || info.title_id[0] == '\0') {
+  /* Quick liveness check: fail immediately for dead processes (ESRCH). */
+  if (kill(pid, 0) != 0 && errno == ESRCH) {
     return -1;
   }
-  if (!is_game_title_id(info.title_id)) {
+  /* Get title ID: try sceSystemServiceGetAppTitleId first — faster and doesn't
+   * require reading from the process namespace.
+   * Fall back to sceKernelGetAppInfo if unavailable. */
+  char title_id_buf[16] = {0};
+  if (sceSystemServiceGetAppTitleId(app_id, title_id_buf) != 0 || title_id_buf[0] == '\0') {
+    app_info_t info;
+    memset(&info, 0, sizeof(info));
+    if (sceKernelGetAppInfo(pid, &info) != 0 || info.title_id[0] == '\0') {
+      return -1;
+    }
+    snprintf(title_id_buf, sizeof(title_id_buf), "%s", info.title_id);
+  }
+  if (!is_game_title_id(title_id_buf)) {
     return -1;
   }
   if (out_title && title_size > 0) {
-    snprintf(out_title, title_size, "%s", info.title_id);
+    snprintf(out_title, title_size, "%s", title_id_buf);
   }
   if (out_base) {
     *out_base = kernel_dynlib_mapbase_addr(pid, 0);
@@ -175,31 +200,58 @@ read_running_state(running_game_state_t *out) {
   if (!st.title_name[0]) {
     snprintf(st.title_name, sizeof(st.title_name), "%s", title);
   }
-  /* Try /proc/{pid}/root/app0 first: accesses the running game's sandbox filesystem
-   * namespace on PS5/FreeBSD. Falls back to direct /app0, then static installed paths.
-   * For PS4 BC games also try the proc-namespace patch path (update SFO may differ from base). */
-  char proc_sfo[64];
-  char proc_patch_sfo[128];
-  snprintf(proc_sfo, sizeof(proc_sfo), "/proc/%d/root/app0/sce_sys/param.sfo", (int)pid);
-  snprintf(proc_patch_sfo, sizeof(proc_patch_sfo),
-           "/proc/%d/root/user/patch/%s/sce_sys/param.sfo", (int)pid, title);
-  read_param_value_from_sfo(proc_sfo, "contentVersion", st.content_version, sizeof(st.content_version));
-  if (!st.content_version[0])
-    read_param_value_from_sfo(proc_patch_sfo, "contentVersion", st.content_version, sizeof(st.content_version));
+  /* Version detection — probe in priority order:
+   *   1. /proc/{pid}/root/patch0  — installed update, contains the current game version
+   *   2. /proc/{pid}/root/app0    — base game, correct only when no update is installed
+   *   3. /app0                    — direct path (works if CheatRunner runs in the game namespace)
+   *   4. Static installed paths   — appmeta scan + known filesystem layout patterns
+   *
+   * The old "/proc/{pid}/root/user/patch/{title}/..." path was wrong: PS5 updates are
+   * mounted as patch0 inside the game's namespace, not under user/patch/. */
+  char proc_root[32];
+  snprintf(proc_root, sizeof(proc_root), "/proc/%d/root", (int)pid);
+
+  /* Probe patch0 then app0 via proc namespace for both version fields */
+  {
+    const char *const subdirs[] = { "patch0", "app0", NULL };
+    for (int _si = 0; subdirs[_si] && !st.content_version[0]; _si++) {
+      char dir[128];
+      snprintf(dir, sizeof(dir), "%s/%s", proc_root, subdirs[_si]);
+      read_param_value_from_dir(dir, "contentVersion", st.content_version, sizeof(st.content_version));
+    }
+    for (int _si = 0; subdirs[_si] && !st.app_version[0]; _si++) {
+      char dir[128];
+      snprintf(dir, sizeof(dir), "%s/%s", proc_root, subdirs[_si]);
+      read_param_value_from_dir(dir, "appVersion", st.app_version, sizeof(st.app_version));
+    }
+  }
+  /* Direct /app0 path (only useful if CheatRunner runs inside the game's sandbox) */
   if (!st.content_version[0])
     read_param_value_from_sfo("/app0/sce_sys/param.sfo", "contentVersion", st.content_version, sizeof(st.content_version));
-  if (!st.content_version[0])
-    read_param_value_by_title_id(title, "contentVersion", st.content_version, sizeof(st.content_version));
-  read_param_value_from_sfo(proc_sfo, "appVersion", st.app_version, sizeof(st.app_version));
-  if (!st.app_version[0])
-    read_param_value_from_sfo(proc_patch_sfo, "appVersion", st.app_version, sizeof(st.app_version));
   if (!st.app_version[0])
     read_param_value_from_sfo("/app0/sce_sys/param.sfo", "appVersion", st.app_version, sizeof(st.app_version));
+  /* Static installed paths (fast — no directory scan) */
+  if (!st.content_version[0])
+    read_param_value_by_title_id(title, "contentVersion", st.content_version, sizeof(st.content_version));
   if (!st.app_version[0])
     read_param_value_by_title_id(title, "appVersion", st.app_version, sizeof(st.app_version));
+  /* Last resort: scan /user/appmeta for the real content ID → sandbox path.
+   * This is the slowest path (directory listing) — only runs when all else fails. */
   if (!st.content_version[0] && !st.app_version[0])
-    cr_log("warn", "game.ver", "version undetected title=%s pid=%d — tried proc=%s and static paths",
-           title, (int)pid, proc_sfo);
+    read_param_value_from_appmeta(title, "contentVersion", st.content_version, sizeof(st.content_version));
+  if (!st.content_version[0] && !st.app_version[0])
+    read_param_value_from_appmeta(title, "appVersion", st.app_version, sizeof(st.app_version));
+
+  if (!st.content_version[0] && !st.app_version[0]) {
+    pthread_mutex_lock(&g_ver_warn_lock);
+    if (strcmp(g_ver_warn_last.title_id, title) != 0 || g_ver_warn_last.pid != pid) {
+      cr_log("warn", "game.ver", "version undetected title=%s pid=%d — tried %s/patch0, %s/app0, static paths",
+             title, (int)pid, proc_root, proc_root);
+      snprintf(g_ver_warn_last.title_id, sizeof(g_ver_warn_last.title_id), "%s", title);
+      g_ver_warn_last.pid = pid;
+    }
+    pthread_mutex_unlock(&g_ver_warn_lock);
+  }
   snprintf(st.eboot_path, sizeof(st.eboot_path), "/app0/eboot.bin");
   if (out) {
     *out = st;
@@ -224,6 +276,7 @@ get_current_title(char *out, size_t out_size) {
   pthread_mutex_unlock(&g_title_lock);
 }
 
+
 void
 rpc_refresh_title_and_notify(void) {
   running_game_state_t cur;
@@ -231,6 +284,21 @@ rpc_refresh_title_and_notify(void) {
   running_state_get(&prev);
   if (read_running_state(&cur) != 0) {
     memset(&cur, 0, sizeof(cur));
+  }
+  /* If the BigApp syscall still reports running but the pid is dead, treat as stopped.
+   * This catches crashes that the PS5 firmware hasn't cleaned up yet. */
+  if (cur.running && cur.pid > 0 && kill(cur.pid, 0) != 0 && errno == ESRCH) {
+    cr_log("info", "game", "pid %d is dead (kill probe failed) — forcing game_stopped", (int)cur.pid);
+    memset(&cur, 0, sizeof(cur));
+  }
+  /* Carry forward already-detected version when the same game/pid is still running.
+   * Avoids re-probing the same param.json / param.sfo files every 500 ms poll tick. */
+  if (cur.running && prev.running && cur.pid == prev.pid &&
+      strcmp(cur.title_id, prev.title_id) == 0) {
+    if (!cur.content_version[0] && prev.content_version[0])
+      snprintf(cur.content_version, sizeof(cur.content_version), "%s", prev.content_version);
+    if (!cur.app_version[0] && prev.app_version[0])
+      snprintf(cur.app_version, sizeof(cur.app_version), "%s", prev.app_version);
   }
   if (cur.running) {
     if (prev.running && strcmp(prev.title_id, cur.title_id) == 0 && prev.started_at > 0) {
@@ -279,6 +347,19 @@ rpc_refresh_title_and_notify(void) {
           g_crash_guard_arr[_gi] = g_crash_guard_arr[--g_crash_guard_n];
         }
         pthread_mutex_unlock(&g_crash_guard_lock);
+        if (just_suspected) {
+          crash_suspects_save();
+          /* Clear addr_cache for the suspected title so the same unverified
+           * address is not reused on the next launch, repeating the crash. */
+          char _susp_path[256]; int _susp_kind = 0;
+          if (find_cheat_file_for_title(prev.title_id, _susp_path,
+                                        sizeof(_susp_path), &_susp_kind)) {
+            addr_cache_clear_for_path(_susp_path);
+            cr_log("info", "addr_cache",
+                   "cleared for crash_suspect title=%s path=%s",
+                   prev.title_id, _susp_path);
+          }
+        }
 
         pthread_mutex_lock(&g_mods_disabled_lock);
         for (int i = g_mods_disabled_n - 1; i >= 0; i--) {
@@ -288,6 +369,18 @@ rpc_refresh_title_and_notify(void) {
         }
         pthread_mutex_unlock(&g_mods_disabled_lock);
         mod_enabled_clear_for_pid(prev.pid);
+        /* Skip the ptrace-bearing patch restore while a cheat apply is in
+         * progress: the apply thread already owns this pid under ptrace, so a
+         * second pt_attach here would stall the 500 ms monitor poll for the full
+         * 2 s attach timeout and fail anyway (pid already traced). If the game
+         * genuinely died mid-apply the patched bytes are gone with the process,
+         * so there is nothing to restore; backups are still cleared below and the
+         * next poll re-evaluates once the apply releases. */
+        if (!g_cheat_applying) {
+          patch_restore_all_for_pid(prev.pid, prev.title_id);
+        }
+        patch_clear_backups_for_pid(prev.pid);
+        patch_clear_for_pid(prev.pid);
 
         {
           uint64_t now_t = now_ms();
@@ -320,6 +413,7 @@ rpc_refresh_title_and_notify(void) {
     if (cur.running) {
       notification_add("game_started", "Game started: %s", cur.title_id);
       cr_log("info", "game", "game started %s", cur.title_id);
+      launch_status_recover_for_game(cur.title_id);
     }
   }
 
@@ -332,6 +426,7 @@ rpc_refresh_title_and_notify(void) {
     if (g_cfg.cheat_post_apply_watch_ms > 0) wcms = g_cfg.cheat_post_apply_watch_ms;
     pthread_mutex_unlock(&g_cfg_lock);
     uint64_t now_t = now_ms();
+    int suspects_auto_cleared = 0;
     pthread_mutex_lock(&g_crash_guard_lock);
     for (int _gi = g_crash_guard_n - 1; _gi >= 0; _gi--) {
       crash_guard_state_t *cg = &g_crash_guard_arr[_gi];
@@ -343,6 +438,7 @@ rpc_refresh_title_and_notify(void) {
         if (strcmp(g_crash_suspects[_si].title_id, cg->title_id) == 0 &&
             g_crash_suspects[_si].mod_index == cg->mod_index) {
           g_crash_suspects[_si] = g_crash_suspects[--g_crash_suspects_n];
+          suspects_auto_cleared++;
           cr_log("info", "cheats.guard",
                  "crash_suspect cleared: mod=%d name=\"%s\" survived %dms watch window",
                  cg->mod_index, cg->mod_name, wcms);
@@ -351,6 +447,9 @@ rpc_refresh_title_and_notify(void) {
       g_crash_guard_arr[_gi] = g_crash_guard_arr[--g_crash_guard_n];
     }
     pthread_mutex_unlock(&g_crash_guard_lock);
+    if (suspects_auto_cleared > 0) {
+      crash_suspects_save();
+    }
   }
 
   pthread_mutex_lock(&g_activity_lock);
@@ -395,6 +494,7 @@ game_monitor_thread(void *arg) {
       poll_ms = g_cfg.cheat_post_apply_poll_ms;
     }
     pthread_mutex_unlock(&g_cfg_lock);
+    config_check_reload();
     usleep((useconds_t)(poll_ms * 1000));
   }
   return NULL;

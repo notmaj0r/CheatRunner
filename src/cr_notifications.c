@@ -29,6 +29,7 @@ notify(const char *fmt, ...) {
 void
 notifications_save(void) {
   cJSON *root = cJSON_CreateObject();
+  if (!root) return;
   cJSON *arr = cJSON_AddArrayToObject(root, "notifications");
   pthread_mutex_lock(&g_notifications_lock);
   cJSON_AddNumberToObject(root, "nextId", g_notification_next_id);

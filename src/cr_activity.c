@@ -53,6 +53,7 @@ activity_find_title_index_locked(const char *title_id) {
 void
 activity_save(void) {
   cJSON *root = cJSON_CreateObject();
+  if (!root) return;
   cJSON *arr = cJSON_AddArrayToObject(root, "titles");
   pthread_mutex_lock(&g_activity_lock);
   cJSON_AddNumberToObject(root, "launchCount", g_activity_launch_count);

@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <dirent.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -349,14 +350,94 @@ cr_title_is_known_media_app(const char *title_id, const char *name) {
 }
 
 int
+read_param_value_from_dir(const char *dir, const char *key, char *out, size_t out_size) {
+  if (!dir || !key || !out || out_size < 2) return -1;
+  char path[512];
+  out[0] = '\0';
+  /* Try SFO */
+  snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", dir);
+  if (sfo_read_value_for_key(path, key, out, out_size) && out[0]) return 0;
+  out[0] = '\0';
+  /* Try JSON (PS5 native games store metadata as param.json) */
+  snprintf(path, sizeof(path), "%s/sce_sys/param.json", dir);
+  char *txt = NULL;
+  if (read_file_text(path, &txt) == 0) {
+    int ok = read_param_json_value(txt, key, out, out_size);
+    free(txt);
+    if (ok && out[0]) return 0;
+  }
+  out[0] = '\0';
+  return -1;
+}
+
+/* Scan appmeta directories for a content entry matching title_id.
+ * Content IDs embed the title ID: e.g. UP9000-CUSA42556_00-HASH.
+ * From the content ID we derive the sandbox mount: /mnt/sandbox/{contentId}_000/.
+ * Returns 0 and fills *out on success, -1 on failure. */
+static int
+appmeta_scan_for_title(const char *title_id, const char *key, char *out, size_t out_size) {
+  static const char *const bases[] = {
+    "/user/appmeta",
+    "/mnt/ext0/user/appmeta",
+    "/mnt/ext1/user/appmeta",
+    NULL
+  };
+  out[0] = '\0';
+  for (int b = 0; bases[b]; b++) {
+    DIR *dp = opendir(bases[b]);
+    if (!dp) continue;
+    struct dirent *ent;
+    while ((ent = readdir(dp)) != NULL) {
+      /* Content IDs always contain the title ID as a substring */
+      if (!strstr(ent->d_name, title_id)) continue;
+      if (!is_safe_filename(ent->d_name)) continue;
+
+      /* Try the sandbox mount (patch0 = current installed update; app0 = base) */
+      char dir[256];
+      const char *const subs[] = { "patch0", "app0", NULL };
+      for (int si = 0; subs[si]; si++) {
+        snprintf(dir, sizeof(dir), "/mnt/sandbox/%s_000/%s", ent->d_name, subs[si]);
+        if (read_param_value_from_dir(dir, key, out, out_size) == 0 && out[0]) {
+          closedir(dp);
+          return 0;
+        }
+      }
+      /* Also try the appmeta entry itself */
+      snprintf(dir, sizeof(dir), "%s/%s", bases[b], ent->d_name);
+      if (read_param_value_from_dir(dir, key, out, out_size) == 0 && out[0]) {
+        closedir(dp);
+        return 0;
+      }
+    }
+    closedir(dp);
+  }
+  return -1;
+}
+
+int
+read_param_value_from_appmeta(const char *title_id, const char *key, char *out, size_t out_size) {
+  if (!title_id || !key || !out || out_size < 2) return -1;
+  out[0] = '\0';
+  return appmeta_scan_for_title(title_id, key, out, out_size);
+}
+
+int
 read_param_value_by_title_id(const char *title_id, const char *key, char *out, size_t out_size) {
   const char *json_candidates[] = {
+      /* system-wide paths, always accessible on PS5 */
+      "/system_data/priv/appmeta/%s/param.json",
+      "/system_data/priv/appmeta/external/%s/param.json",
+      /* standard user paths */
       "/user/appmeta/%s/param.json",
       "/user/appmeta/%s/sce_sys/param.json",
       "/user/app/%s/sce_sys/param.json",
       NULL,
   };
   const char *sfo_candidates[] = {
+      /* system-wide paths, always accessible on PS5 */
+      "/system_data/priv/appmeta/%s/param.sfo",
+      "/system_data/priv/appmeta/external/%s/param.sfo",
+      /* standard paths */
       "/user/patch/%s/sce_sys/param.sfo",           /* patch/update before base app */
       "/user/appmeta/%s/param.sfo",
       "/user/appmeta/%s/sce_sys/param.sfo",

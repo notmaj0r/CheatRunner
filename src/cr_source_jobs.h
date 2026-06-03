@@ -27,7 +27,7 @@ typedef struct {
   cr_job_state_t state;
   char title_id[16];
   char version[64];
-  char body_json[4096];
+  char body_json[16384];
   cJSON *result;
   char error[128];
   int http_status;

@@ -24,7 +24,13 @@ const char *platform_for_title_id(const char *title_id);
 int cr_title_is_known_media_app(const char *title_id, const char *name);
 
 int read_param_value_by_title_id(const char *title_id, const char *key, char *out, size_t out_size);
+/* Scan /user/appmeta (and external) for a content dir matching title_id, then
+ * read key from the sandbox mount (patch0 before app0).  Slow — only call
+ * when faster paths have already failed and version detection is critical. */
+int read_param_value_from_appmeta(const char *title_id, const char *key, char *out, size_t out_size);
 int read_param_value_from_sfo(const char *sfo_path, const char *key, char *out, size_t out_size);
+/* Read a param from a game directory — tries sce_sys/param.sfo then sce_sys/param.json */
+int read_param_value_from_dir(const char *dir, const char *key, char *out, size_t out_size);
 int load_title_meta(const char *dir_path, const char *fallback_id, char *title_id, size_t id_size,
                     char *title_name, size_t name_size);
 

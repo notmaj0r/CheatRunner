@@ -6,6 +6,7 @@
 #include "third_party/cJSON.h"
 #include "third_party/mc4/mc4decrypter.h"
 #include "cr_paths.h"
+#include "cr_log.h"
 #include "cr_cheat_formats.h"
 
 int
@@ -208,6 +209,14 @@ mc4_decrypt_to_xml(const char *cipher, size_t cipher_len, size_t *xml_size_out) 
     *dst = '\0';
     out_len = (size_t)(dst - xml);
   }
+  /* Sanity-check: a successful AES decrypt on corrupted or wrong-key input
+   * produces garbage bytes that happen not to be NULL.  Valid XML always
+   * starts with '<'.  Catching this here prevents shn_xml_to_json() from
+   * silently returning an empty mod list with no error. */
+  if (out_len == 0 || xml[0] != '<') {
+    free(xml);
+    return NULL;
+  }
   if (xml_size_out) {
     *xml_size_out = out_len;
   }
@@ -272,6 +281,8 @@ shn_xml_to_json(const char *xml, size_t xml_len) {
     size_t hdr_len = (size_t)(close - cur);
     char hdr[2048];
     if (hdr_len >= sizeof(hdr)) {
+      cr_log("warn", "cheat_fmt", "skipping <Cheat> element: header too large (%zu bytes, limit %zu) — cheat will be missing from mod list",
+             hdr_len, sizeof(hdr) - 1);
       cur = close;
       continue;
     }
@@ -314,7 +325,13 @@ shn_xml_to_json(const char *xml, size_t xml_len) {
     }
     cheat_buf_puts(&out, ",");
 
-    cheat_buf_puts(&out, "\"type\":\"checkbox\",");
+    {
+      size_t type_alen = 0;
+      const char *type_v = xml_find_attr(hdr, "Type", &type_alen);
+      int is_button = (type_v && type_alen >= 6 &&
+                       !strncasecmp(type_v, "button", 6));
+      cheat_buf_puts(&out, is_button ? "\"type\":\"button\"," : "\"type\":\"checkbox\",");
+    }
     cheat_buf_puts(&out, "\"memory\":[");
 
     int first_mem = 1;
@@ -334,6 +351,8 @@ shn_xml_to_json(const char *xml, size_t xml_len) {
       char chunk[4096];
       size_t cl = (size_t)(line_end - line_cur);
       if (cl >= sizeof(chunk)) {
+        cr_log("warn", "cheat_fmt", "skipping <Cheatline> element: content too large (%zu bytes, limit %zu) — one memory entry will be missing",
+               cl, sizeof(chunk) - 1);
         line_cur = line_end;
         continue;
       }
@@ -348,6 +367,14 @@ shn_xml_to_json(const char *xml, size_t xml_len) {
       const char *on = xml_find_child(chunk, "ValueOn", &on_l);
       const char *off2 = xml_find_child(chunk, "ValueOff", &off2_l);
       const char *abs_ = xml_find_child(chunk, "Absolute", &abs_l);
+      size_t sec_l = 0;
+      const char *sec_ = xml_find_child(chunk, "Section", &sec_l);
+      int section_num = 0;
+      if (sec_ && sec_l > 0 && sec_l < 8) {
+        char sec_buf[8] = {0};
+        memcpy(sec_buf, sec_, sec_l);
+        section_num = atoi(sec_buf);
+      }
       if (off && on && off2) {
         if (!first_mem) {
           cheat_buf_putc(&out, ',');
@@ -363,6 +390,11 @@ shn_xml_to_json(const char *xml, size_t xml_len) {
         if (abs_ && abs_l > 0 &&
             (!strncasecmp(abs_, "true", 4) || abs_[0] == '1')) {
           cheat_buf_puts(&out, ",\"absolute\":true");
+        }
+        if (section_num != 0) {
+          char sec_s[32];
+          snprintf(sec_s, sizeof(sec_s), ",\"section\":%d", section_num);
+          cheat_buf_puts(&out, sec_s);
         }
         cheat_buf_puts(&out, "}");
       }

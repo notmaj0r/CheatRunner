@@ -47,6 +47,7 @@ typedef struct notify_request {
 /* ── SceSystemService ─────────────────────────────────────────────────────── */
 
 int sceSystemServiceGetAppIdOfRunningBigApp(void);
+int sceSystemServiceGetAppTitleId(int app_id, char *title_id_out);
 int sceSystemServiceKillApp(int app_id, int how, int reason, int core_dump);
 int sceSystemServiceLaunchApp(const char *title_id, char **argv, app_launch_ctx_t *ctx);
 

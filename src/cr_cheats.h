@@ -91,7 +91,7 @@ typedef struct {
   uint64_t ts_ms;
 } last_apply_rec_t;
 
-#define MOD_DISABLED_MAX 64
+#define MOD_DISABLED_MAX 256
 #define CRASH_GUARD_MAX 8
 #define CRASH_SUSPECT_MAX 32
 
@@ -109,7 +109,13 @@ extern pthread_mutex_t g_last_game_exit_lock;
 extern last_game_exit_t g_last_game_exit;
 extern pthread_mutex_t g_last_apply_lock;
 extern last_apply_rec_t g_last_apply_rec;
-extern volatile int g_cheat_applying;
+extern _Atomic int g_cheat_applying;
+/* Global ptrace-session gate. Held across the whole attach→write→detach window by
+ * the cheat-apply path; the patch-apply and patch-restore paths take it too so no
+ * two threads ever hold the game pid under ptrace at once (a second pt_attach on an
+ * already-traced pid fails and its cleanup PT_DETACHes the first session). Dashboard
+ * read paths back off on g_cheat_applying, which every writer sets while holding it. */
+extern pthread_mutex_t g_cheat_apply_lock;
 extern volatile uint64_t g_last_apply_at_ms;
 extern volatile uint64_t g_post_apply_guard_until_ms;
 
@@ -125,8 +131,13 @@ int  cheat_manual_get(const char *title_id, char *out, size_t out_sz);
 int mod_disabled_check(const char *tid, pid_t pid, int mod);
 int mod_enabled_check(const char *tid, pid_t pid, int mod);
 void mod_enabled_clear_for_pid(pid_t pid);
+int cheat_any_enabled_for_title(const char *title_id, pid_t pid);
 void fmt_hex16(const uint8_t *b, size_t len, char *buf, size_t buf_sz);
 int apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, size_t err_size);
+
+/* Persist crash suspects to / from disk so they survive CheatRunner restarts */
+void crash_suspects_save(void);
+void crash_suspects_load(void);
 
 #endif
 

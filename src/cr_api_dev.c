@@ -16,6 +16,14 @@ cr_api_dev_handle(int fd, const char *method, const char *path,
     handle_api_config_set(fd, query);
     return 1;
   }
+  if (!strcmp(path, "/api/config/reset")) {
+    handle_api_config_reset(fd);
+    return 1;
+  }
+  if (!strcmp(path, "/api/config/preset")) {
+    handle_api_config_preset(fd, query);
+    return 1;
+  }
   if (!strcmp(path, "/api/dev/privileges")) {
     handle_api_dev_privileges(fd);
     return 1;

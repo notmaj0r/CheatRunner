@@ -11,6 +11,7 @@
 #include "third_party/cJSON.h"
 #include "cr_log.h"
 #include "cr_paths.h"
+#include "cr_dns.h"
 #include "http_client.h"
 #include "cr_repo_mirror.h"
 
@@ -42,9 +43,10 @@ typedef struct {
 } mirror_entry_list_t;
 
 static const repo_def_t REPOS[] = {
-  { "hencollection", "TeeKay87", "HEN-Cheats-Collection", "master", "cheats" },
-  { "ps5cheats",     "etaHEN",   "PS5_Cheats",            "main",   ""       },
-  { "goldhen",       "GoldHEN",  "GoldHEN_Cheat_Repository", "main", ""      },
+  { "hencollection", "TeeKay87",  "HEN-Cheats-Collection",    "master", "cheats" },
+  { "ps5cheats",     "etaHEN",    "PS5_Cheats",               "main",   ""       },
+  { "goldhen",       "GoldHEN",   "GoldHEN_Cheat_Repository", "main",   ""       },
+  { "henppsa",       "RDX-Sci01", "HEN-PPSA-Cheats",          "main",   "cheats" },
 };
 
 #define REPOS_COUNT ((int)(sizeof(REPOS) / sizeof(REPOS[0])))
@@ -261,9 +263,10 @@ repo_list_from_tree(const repo_def_t *repo, mirror_entry_list_t *out, int *out_t
   int status = 0;
   uint8_t *data = NULL;
   size_t data_len = 0;
-  if (http_get_url_ex(AGENT, url, TREE_LIST_MAX, &status, &data, &data_len) != 0 ||
-      status != 200 || !data || data_len == 0) {
-    cr_log("warn", "repo_mirror", "tree failed source=%s status=%d; trying contents fallback", repo->id, status);
+  int hrc = http_get_url_ex(AGENT, url, TREE_LIST_MAX, &status, &data, &data_len);
+  if (hrc != 0 || status != 200 || !data || data_len == 0) {
+    cr_log("warn", "repo_mirror", "tree failed source=%s rc=%d status=%d; trying contents fallback",
+           repo->id, hrc, status);
     free(data);
     return -1;
   }
@@ -470,31 +473,31 @@ progress_inc_failed(void) {
   pthread_mutex_unlock(&g_repo_mirror.lock);
 }
 
-static void
-process_entries_download(const repo_def_t *repo, mirror_entry_list_t *list, int overwrite) {
-  if (!list || list->count <= 0) {
-    return;
-  }
+#define MIRROR_DL_WORKERS 8
 
-  qsort(list->items, (size_t)list->count, sizeof(list->items[0]), entry_cmp_by_dest);
-  progress_add_total(list->count);
+typedef struct {
+  const repo_def_t *repo;
+  mirror_entry_t   *items;
+  int               count;
+  int               overwrite;
+  int               next;      /* next entry index to claim, protected by lock */
+  pthread_mutex_t   lock;
+} dl_queue_t;
 
-  for (int i = 0; i < list->count; i++) {
-    mirror_entry_t *e = &list->items[i];
-    if (i > 0) {
-      mirror_entry_t *prev = &list->items[i - 1];
-      if (prev->kind == e->kind && strcmp(prev->basename, e->basename) == 0) {
-        progress_inc_skipped();
-        cr_log("warn", "repo_mirror", "duplicate basename in same run source=%s file=%s path=%s",
-               repo->id, e->basename, e->path);
-        continue;
-      }
-    }
+static void *
+dl_worker_fn(void *arg) {
+  dl_queue_t *q = (dl_queue_t *)arg;
+  for (;;) {
+    pthread_mutex_lock(&q->lock);
+    int i = q->next++;
+    pthread_mutex_unlock(&q->lock);
+    if (i >= q->count) break;
 
+    mirror_entry_t *e = &q->items[i];
     char dest_path[768];
     snprintf(dest_path, sizeof(dest_path), "%s/%s", e->dest_dir, e->basename);
 
-    if (!overwrite) {
+    if (!q->overwrite) {
       struct stat st;
       if (stat(dest_path, &st) == 0 && S_ISREG(st.st_mode)) {
         progress_inc_skipped();
@@ -508,17 +511,24 @@ process_entries_download(const repo_def_t *repo, mirror_entry_list_t *list, int 
     uint8_t *fdata = NULL;
     size_t flen = 0;
     int rc = http_get_url_ex(AGENT, e->raw_url, FILE_MAX, &status, &fdata, &flen);
-    if (rc != 0 || status != 200 || !fdata || flen == 0) {
+    if (rc != 0 || status != 200) {
       progress_inc_failed();
       progress_add_missing(e->basename);
-      cr_log("warn", "repo_mirror", "download failed source=%s file=%s status=%d", repo->id, e->basename, status);
+      cr_log("warn", "repo_mirror", "download failed source=%s file=%s rc=%d status=%d",
+             q->repo->id, e->basename, rc, status);
+      free(fdata);
+      continue;
+    }
+    if (!fdata || flen == 0) {
+      cr_log("info", "repo_mirror", "skip empty source=%s file=%s", q->repo->id, e->basename);
+      progress_inc_skipped();
       free(fdata);
       continue;
     }
     if (write_file_atomic(dest_path, fdata, flen) != 0) {
       progress_inc_failed();
       progress_add_missing(e->basename);
-      cr_log("warn", "repo_mirror", "write failed source=%s file=%s", repo->id, e->basename);
+      cr_log("warn", "repo_mirror", "write failed source=%s file=%s", q->repo->id, e->basename);
       free(fdata);
       continue;
     }
@@ -526,6 +536,56 @@ process_entries_download(const repo_def_t *repo, mirror_entry_list_t *list, int 
     progress_inc_downloaded();
     cr_log("info", "repo_mirror", "saved %s (%zu bytes)", e->basename, flen);
   }
+  return NULL;
+}
+
+static void
+process_entries_download(const repo_def_t *repo, mirror_entry_list_t *list, int overwrite) {
+  if (!list || list->count <= 0) return;
+
+  qsort(list->items, (size_t)list->count, sizeof(list->items[0]), entry_cmp_by_dest);
+
+  /* Pre-deduplicate sorted list in-place (same basename+kind from the same repo run) */
+  int n = 0;
+  for (int i = 0; i < list->count; i++) {
+    if (n > 0) {
+      mirror_entry_t *prev = &list->items[n - 1];
+      mirror_entry_t *cur  = &list->items[i];
+      if (prev->kind == cur->kind && strcmp(prev->basename, cur->basename) == 0) {
+        cr_log("warn", "repo_mirror", "duplicate basename source=%s file=%s path=%s",
+               repo->id, cur->basename, cur->path);
+        continue;
+      }
+    }
+    if (n != i) list->items[n] = list->items[i];
+    n++;
+  }
+  list->count = n;
+
+  progress_add_total(list->count);
+
+  /* Parallel download: spin up MIRROR_DL_WORKERS threads sharing a work queue.
+   * Each worker atomically claims the next entry by incrementing queue->next under
+   * the queue lock, then downloads and saves it independently. */
+  dl_queue_t q;
+  memset(&q, 0, sizeof(q));
+  q.repo      = repo;
+  q.items     = list->items;
+  q.count     = list->count;
+  q.overwrite = overwrite;
+  q.next      = 0;
+  pthread_mutex_init(&q.lock, NULL);
+
+  pthread_t workers[MIRROR_DL_WORKERS];
+  int spawned = 0;
+  for (int i = 0; i < MIRROR_DL_WORKERS; i++) {
+    if (pthread_create(&workers[i], NULL, dl_worker_fn, &q) == 0)
+      spawned++;
+  }
+  for (int i = 0; i < spawned; i++)
+    pthread_join(workers[i], NULL);
+
+  pthread_mutex_destroy(&q.lock);
 }
 
 static void
@@ -579,6 +639,14 @@ mirror_thread(void *arg) {
   int start_idx = all_sources ? 0 : repo_idx;
   int end_idx   = all_sources ? (REPOS_COUNT - 1) : repo_idx;
   int source_total = end_idx - start_idx + 1;
+
+  /* Verify DNS bypass is working before starting downloads */
+  {
+    char test_ip[64] = {0};
+    int dns_ok = (cr_dns_resolve("api.github.com", test_ip, sizeof(test_ip)) == 0);
+    cr_log("info", "repo_mirror", "dns_bypass_check api.github.com -> %s",
+           dns_ok ? test_ip : "FAILED (check network/UDP port 53 to 8.8.8.8)");
+  }
 
   for (int i = start_idx; i <= end_idx; i++) {
     const repo_def_t *repo = &REPOS[i];

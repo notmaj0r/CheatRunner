@@ -11,6 +11,10 @@
 #define CHEATRUNNER_CHEATS_MC4_DIR    "/data/cheatrunner/cheats/mc4"
 #define ETAHEN_CHEATS_DIR             "/data/etaHEN/cheats"
 #define ELF_ARSENAL_CHEATS_DIR        "/data/elf-arsenal/cheats"
+#define CHEATRUNNER_PATCHES_DIR       "/data/cheatrunner/patches"
+#define CHEATRUNNER_PATCHES_XML_DIR   "/data/cheatrunner/patches/xml"
+#define CHEATRUNNER_PATCHES_PS5_DIR   "/data/cheatrunner/patches/xml_prospero"
+#define ELF_ARSENAL_PATCHES_XML_DIR   "/data/elf-arsenal/patches/xml"
 #define CHEATRUNNER_CACHE_DIR         "/data/cheatrunner/cache"
 #define CHEATRUNNER_CACHE_ICON_DIR    "/data/cheatrunner/cache/icons"
 #define CHEATRUNNER_CACHE_PIC0_DIR    "/data/cheatrunner/cache/pic0"
@@ -22,7 +26,11 @@
 #define CHEATRUNNER_SOURCES_PATH      "/data/cheatrunner/sources.json"
 #define CHEATRUNNER_LOG_PATH          "/data/cheatrunner/logs.json"
 #define CHEATRUNNER_NOTIFICATIONS_PATH "/data/cheatrunner/notifications.json"
-#define CHEATRUNNER_ACTIVITY_PATH     "/data/cheatrunner/activity.json"
+#define CHEATRUNNER_ACTIVITY_PATH       "/data/cheatrunner/activity.json"
+#define CHEATRUNNER_CRASH_SUSPECTS_PATH "/data/cheatrunner/crash_suspects.json"
+#define CHEATRUNNER_ADDR_CACHE_PATH     "/data/cheatrunner/addr_cache.json"
+#define CHEATRUNNER_TITLE_PREFS_PATH    "/data/cheatrunner/title_prefs.json"
+#define CHEATRUNNER_FAVORITES_PATH      "/data/cheatrunner/favorites.json"
 
 /* General utilities */
 void     str_trim(char *s);
