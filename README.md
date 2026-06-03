@@ -8,7 +8,7 @@ It provides a local web dashboard to:
 - launch installed titles from a browser;
 - load local cheat files from the PS5 filesystem;
 - use `.mc4`, `.shn`, and `.json` trainers;
-- auto-apply local PS-Game-Patch XML patches when a game starts;
+- apply local XML patches manually from the dashboard;
 - optionally download cheat files from configured cheat sources;
 - enable/disable supported cheats from your browser;
 - inspect logs, diagnostics, and cheat debug information.
@@ -58,15 +58,23 @@ Runtime cheat memory writes can crash the game, break a session, corrupt your sa
 - PS5 web dashboard.
 - Installed games/apps list.
 - PS5 / PS4 / Apps filters.
+- Favorites and Recent tabs — star games to pin them; recently launched/opened titles are tracked automatically. Synced console-side, so they're identical on every device that opens the dashboard.
+- First-run onboarding with a quick system check and one-click setup profiles.
 - App title names from `app.db` when SQLite support is enabled.
 - Launch installed games/apps from the browser.
 - Local cheat loading from `/data/cheatrunner/cheats`.
 - `.mc4`, `.shn`, and `.json` cheat/trainer support.
-- PS-Game-Patch XML auto-patch support.
+- Manual local PS-Game-Patch XML listing and application are supported.
+- Version-aware patch selection — matches `AppVer` fields; mask-version patches apply regardless of game version.
 - Optional remote cheat downloads from configured cheat sources.
 - ON/OFF trainer toggles where supported.
 - Runtime restore where possible.
-- Crash-suspect detection.
+- Crash-suspect detection — mods that crash the game are flagged and blocked from re-enabling automatically; suspects persist across CheatRunner restarts.
+- Version-aware cheat selection with candidate selector and manual override.
+- Per-title address mode override (Auto / Absolute / Relative) for SHN and MC4 files.
+- Address learning cache — resolved SHN/MC4 addresses reused on subsequent applies.
+- Settings panel — address resolution, safety timers, log level, and advanced toggles, all configurable from the dashboard, with one-click presets (Safe / Max Compatibility / Debug), live search, reset-to-defaults, and a dark theme picker.
+- Config hot-reload — edits to `config.ini` on the PS5 (FTP/SSH) are picked up automatically within ~500 ms, no restart required.
 - Logs panel.
 - Copy Logs / Copy Cheat Debug / Copy Diagnostic Bundle.
 - Shutdown Payload button for testing and cleanup.
@@ -121,13 +129,15 @@ When reporting bugs, include:
 
 CheatRunner is local-first. Local cheat files remain the primary workflow.
 
-Default path:
+### Search paths (scanned in order)
 
 ```text
-/data/cheatrunner/cheats
+/data/cheatrunner/cheats   ← primary path
+/data/etaHEN/cheats        ← etaHEN cross-compatibility
+/data/elf-arsenal/cheats   ← elf-arsenal cross-compatibility
 ```
 
-Recommended folders:
+Recommended sub-folders inside the primary path:
 
 ```text
 /data/cheatrunner/cheats/mc4
@@ -144,23 +154,35 @@ Example files:
 /data/cheatrunner/cheats/json/CUSA00000.json
 ```
 
-CheatRunner will try to match cheats by title ID and version when possible.
+### Version-aware selection
+
+CheatRunner matches cheat files by title ID and game version:
+
+- **Exact match** (`CUSA00000_01.09.json`) — selected automatically when the running game reports that version.
+- **Generic** (`CUSA00000.json`, no version in filename) — used as fallback when no exact match exists.
+- **Wrong version** — loaded as a last resort when no exact or generic file exists; the cheat menu shows a version-mismatch warning banner and a `WRONG VER` badge. The candidate selector lets you force-switch or download a better match.
+
+### Per-title address mode
+
+For SHN and MC4 cheat files an **Address Mode** selector appears above the mod list: `Auto` (default), `Absolute`, or `Relative`. Use this to override address resolution for a specific game if cheats land at the wrong address. The preference is saved per title ID.
+
+### Address learning cache
+
+Resolved SHN/MC4 addresses are cached to `/data/cheatrunner/addr_cache.json`. On the second apply of the same cheat file, the cached address is used directly — no re-probing needed. The cache is invalidated automatically when the cheat file changes on disk.
 
 ---
 
-## 🌐 Remote Cheat Sources
+## 📁 Local Patches
 
-CheatRunner can optionally download cheat files from configured cheat repositories.
+CheatRunner supports **PS-Game-Patch** XML patches.
 
-Remote downloads are user-triggered and are intended only as a convenience layer over the local cheat workflow.
-
-The main local cheat path remains:
+Patch search paths (scanned in this order):
 
 ```text
-/data/cheatrunner/cheats
+/data/cheatrunner/patches/xml_prospero   ← PS5-native patches
+/data/cheatrunner/patches/xml            ← PS4 BC / general patches
+/data/elf-arsenal/patches/xml            ← elf-arsenal cross-compatibility
 ```
-
-Remote XML game patch downloads are not bundled. Use local patch files under `/data/cheatrunner/patches` or `/data/elf-arsenal/patches`.
 
 ---
 
@@ -217,9 +239,11 @@ Special thanks to:
 
 - **ELF Arsenal & VoidShell** for project ideas and implementations;
 - **ps5-payload-sdk** developers and contributors;
-- **TeeKay87** for the HEN-Cheats-Collection project;
-- **etaHEN** for the PS5_Cheats project;
-- **GoldHEN** for the GoldHEN_Cheat_Repository project;
+- **TeeKay87** for the [HEN-Cheats-Collection](https://github.com/TeeKay87/HEN-Cheats-Collection) project;
+- **etaHEN** for the [PS5_Cheats](https://github.com/etaHEN/PS5_Cheats) project;
+- **GoldHEN** for the [GoldHEN_Cheat_Repository](https://github.com/GoldHEN/GoldHEN_Cheat_Repository) project;
+- **RDX-Sci01** for the [HEN-PPSA-Cheats](https://github.com/RDX-Sci01/HEN-PPSA-Cheats) project;
+- **illusionyy** for the [PS-Game-Patch](https://github.com/illusionyy/ps-game-patch) project;
 - everyone testing, reporting logs, and helping improve the project.
 
 ---
