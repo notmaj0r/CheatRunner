@@ -50,6 +50,8 @@
 #include "cr_api_sources.h"
 #include "cr_api_dev.h"
 #include "cr_api_logs.h"
+#include "cr_fan.h"
+#include "cr_profile.h"
 #include "cr_shutdown.h"
 #include "cr_store_lookup.h"
 #include "http_client.h"
@@ -324,6 +326,7 @@ static struct {
   int      mod_index;
   uint64_t last_ms;
 } g_mismatch_warn_slots[MISMATCH_WARN_SLOTS];
+static pthread_mutex_t g_mismatch_warn_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* cheat_select log dedup: only log when selection state changes */
 static struct {
@@ -338,14 +341,20 @@ static const char *
 mismatch_warn_level(const char *title_id, int mod_index) {
   uint64_t now = now_ms();
   int oldest = 0;
+  const char *level;
+  pthread_mutex_lock(&g_mismatch_warn_lock);
   uint64_t oldest_ms = g_mismatch_warn_slots[0].last_ms;
   for (int i = 0; i < MISMATCH_WARN_SLOTS; i++) {
     if (g_mismatch_warn_slots[i].mod_index == mod_index &&
         strncmp(g_mismatch_warn_slots[i].title_id, title_id, 15) == 0) {
-      if (now - g_mismatch_warn_slots[i].last_ms < MISMATCH_WARN_INTERVAL_MS)
-        return "debug";
-      g_mismatch_warn_slots[i].last_ms = now;
-      return "warn";
+      if (now - g_mismatch_warn_slots[i].last_ms < MISMATCH_WARN_INTERVAL_MS) {
+        level = "debug";
+      } else {
+        g_mismatch_warn_slots[i].last_ms = now;
+        level = "warn";
+      }
+      pthread_mutex_unlock(&g_mismatch_warn_lock);
+      return level;
     }
     if (g_mismatch_warn_slots[i].last_ms < oldest_ms) {
       oldest_ms = g_mismatch_warn_slots[i].last_ms;
@@ -357,6 +366,7 @@ mismatch_warn_level(const char *title_id, int mod_index) {
   g_mismatch_warn_slots[oldest].title_id[15] = '\0';
   g_mismatch_warn_slots[oldest].mod_index = mod_index;
   g_mismatch_warn_slots[oldest].last_ms = now;
+  pthread_mutex_unlock(&g_mismatch_warn_lock);
   return "warn";
 }
 
@@ -668,6 +678,7 @@ handle_api_state(int fd) {
   char cheat_format_field[16];
   if (has_cheat) snprintf(cheat_format_field, sizeof(cheat_format_field), "\"%s\"", cheat_fmt);
   else           strcpy(cheat_format_field, "null");
+  int can_patch = cr_priv_can_patch_game_memory();
   char body[4096];
   if (rs.running) {
     snprintf(
@@ -676,7 +687,7 @@ handle_api_state(int fd) {
         "\"cheatSource\":\"local\",\"running\":{\"running\":true,\"titleId\":\"%s\",\"titleName\":\"%s\","
         "\"platform\":\"%s\",\"appId\":\"0x%X\",\"pid\":%d,\"imageBase\":\"0x%lx\",\"contentVersion\":\"%s\","
         "\"appVersion\":\"%s\",\"startedAt\":%llu,\"hasCheat\":%s,\"cheatFormat\":%s},"
-        "\"cheats\":{\"engine\":%s,\"activeCount\":0,\"lastApplied\":\"%s\",\"localCount\":%d},"
+        "\"cheats\":{\"engine\":%s,\"activeCount\":0,\"lastApplied\":\"%s\",\"localCount\":%d,\"canPatchGameMemory\":%s},"
         "\"config\":{\"autoLoadCheatMenu\":%s,"
         "\"autoDownloadMissingCheat\":%s,\"allowForceEnable\":%s,\"cheatStateAfterLaunchDelayMs\":%d},"
         "\"dev\":{\"reloadEnabled\":%s,\"shutdownDelayMs\":%d}}",
@@ -684,6 +695,7 @@ handle_api_state(int fd) {
         rs.platform, rs.app_id, (int)rs.pid, (long)rs.image_base, rs.content_version, rs.app_version,
         (unsigned long long)rs.started_at, has_cheat ? "true" : "false",
         cheat_format_field, cheat_engine ? "true" : "false", last_esc ? last_esc : "", local_count,
+        can_patch ? "true" : "false",
         auto_load ? "true" : "false", auto_download ? "true" : "false", allow_force_enable ? "true" : "false",
         cheat_state_delay_ms, dev_reload_enabled ? "true" : "false", dev_shutdown_delay_ms);
   } else {
@@ -691,12 +703,12 @@ handle_api_state(int fd) {
         body, sizeof(body),
         "{\"ok\":true,\"version\":\"%s\",\"browserUrl\":\"http://%s:%d/\",\"httpPort\":%d,"
         "\"cheatSource\":\"local\",\"running\":{\"running\":false},"
-        "\"cheats\":{\"engine\":%s,\"activeCount\":0,\"lastApplied\":\"%s\",\"localCount\":%d},"
+        "\"cheats\":{\"engine\":%s,\"activeCount\":0,\"lastApplied\":\"%s\",\"localCount\":%d,\"canPatchGameMemory\":%s},"
         "\"config\":{\"autoLoadCheatMenu\":%s,"
         "\"autoDownloadMissingCheat\":%s,\"allowForceEnable\":%s,\"cheatStateAfterLaunchDelayMs\":%d},"
         "\"dev\":{\"reloadEnabled\":%s,\"shutdownDelayMs\":%d}}",
         CHEATRUNNER_VERSION, g_listen_ip, http_port, http_port, cheat_engine ? "true" : "false",
-        last_esc ? last_esc : "", local_count,
+        last_esc ? last_esc : "", local_count, can_patch ? "true" : "false",
         auto_load ? "true" : "false", auto_download ? "true" : "false",
         allow_force_enable ? "true" : "false", cheat_state_delay_ms, dev_reload_enabled ? "true" : "false",
         dev_shutdown_delay_ms);
@@ -742,6 +754,17 @@ build_games_json_array(char *buf, size_t cap, int debug_names) {
   appdb_collect_games(entries, &count);
   char running_title[32];
   get_current_title(running_title, sizeof(running_title));
+  /* Move the active game to the top of the list */
+  if (running_title[0]) {
+    for (size_t i = 1; i < count; i++) {
+      if (strcmp(running_title, entries[i].title_id) == 0) {
+        game_entry_t tmp = entries[i];
+        memmove(&entries[1], &entries[0], i * sizeof(game_entry_t));
+        entries[0] = tmp;
+        break;
+      }
+    }
+  }
   size_t off = 0;
   off += (size_t)snprintf(buf + off, cap - off, "[");
   size_t emitted = 0;
@@ -777,12 +800,15 @@ build_games_json_array(char *buf, size_t cap, int debug_names) {
         "%s{\"titleId\":\"%s\",\"titleName\":\"%s\",\"platform\":\"%s\",\"kind\":\"%s\",\"isApp\":%s,"
         "\"version\":\"%s\","
         "\"contentId\":\"%s\",\"icon\":%s,\"iconUrl\":\"/appdb/icon?id=%s\",\"pic0\":%s,"
-        "\"pic0Url\":\"/appdb/pic0?id=%s\",\"hasCheat\":%s,\"cheatFormat\":\"%s\",\"hasPatch\":%s,\"running\":%s",
+        "\"pic0Url\":\"/appdb/pic0?id=%s\",\"hasCheat\":%s,\"cheatFormat\":\"%s\",\"hasPatch\":%s,\"running\":%s,"
+        "\"playTime\":%llu,\"lastAccessTime\":%llu",
         emitted == 0 ? "" : ",", entries[i].title_id, name_esc, platform,
         is_app ? "app" : "game", is_app ? "true" : "false",
         ver_esc ? ver_esc : "unknown", cid_esc ? cid_esc : "",
         has_icon ? "true" : "false", entries[i].title_id, has_pic0 ? "true" : "false", entries[i].title_id,
-        has_cheat ? "true" : "false", cheat_fmt, has_patch ? "true" : "false", running ? "true" : "false");
+        has_cheat ? "true" : "false", cheat_fmt, has_patch ? "true" : "false", running ? "true" : "false",
+        (unsigned long long)entries[i].play_time_seconds,
+        (unsigned long long)entries[i].last_access_time);
     if (debug_names) {
       char *src_esc = json_escape(entries[i].name_source[0] ? entries[i].name_source : "fallback_title_id");
       off += (size_t)snprintf(buf + off, cap - off, ",\"nameSource\":\"%s\",\"nameResolved\":%s",
@@ -1832,6 +1858,7 @@ handle_api_cheats_state(int fd, const char *query) {
       int mismatch = 0;
       int baseline_unknown = 0;
       int mismatch_logged = 0;
+      int ff_hook = 0;
       cJSON *m = NULL;
       cJSON_ArrayForEach(m, mem) {
         if (state != CHEAT_STATE_UNKNOWN) break;
@@ -1946,6 +1973,13 @@ handle_api_cheats_state(int fd, const char *query) {
         }
         if (!is_on && !is_off && !cross_mod_inactive && off_reliable) {
           mismatch++;
+          if (on_len > 0 && on_len < 16) {
+            int all_ff = 1;
+            for (size_t _bz = 0; _bz < on_len; _bz++) {
+              if (cur[_bz] != 0xFF) { all_ff = 0; break; }
+            }
+            if (all_ff) ff_hook++;
+          }
         }
         if (!is_on && !off_reliable) {
           /* MC4/SHN without reliable baseline: check if current bytes match ValueOff.
@@ -1966,11 +2000,18 @@ handle_api_cheats_state(int fd, const char *query) {
             bytes_to_hex(exp_len > 0 ? exp_b : off_b, on_len > 16 ? 16 : on_len, exp_hex, sizeof(exp_hex));
             snprintf(addr_hex, sizeof(addr_hex), "0x%lx", (long)addr);
             snprintf(off_hex_addr, sizeof(off_hex_addr), "0x%llX", (unsigned long long)off_u);
+            /* Detect if current bytes are all printable ASCII — strong sign the
+             * offset landed in string/data rather than executable code. */
+            int cur_is_ascii = (on_len > 0);
+            for (size_t _ai = 0; _ai < on_len && cur_is_ascii; _ai++) {
+              if (cur[_ai] < 0x20 || cur[_ai] > 0x7E) cur_is_ascii = 0;
+            }
             cr_log(mismatch_warn_level(title_id, mod_index), "cheats",
                    "mismatch title=%s contentVersion=%s file=%s format=%s mod=\"%s\" modIndex=%d writeIndex=%d pid=%d "
-                   "base=0x%lx offset=%s addr=%s expected=%s...(len=%zu) current=%s...(len=%zu) on=%s...(len=%zu)",
+                   "base=0x%lx offset=%s addr=%s expected=%s...(len=%zu) current=%s...(len=%zu) on=%s...(len=%zu)%s",
                    title_id, st.content_version[0] ? st.content_version : "unknown", cheat_path, fmt, mod_name, mod_index,
-                   total - 1, (int)pid, (long)mod_base_st, off_hex_addr, addr_hex, exp_hex, on_len, cur_hex, on_len, on_hex, on_len);
+                   total - 1, (int)pid, (long)mod_base_st, off_hex_addr, addr_hex, exp_hex, on_len, cur_hex, on_len, on_hex, on_len,
+                   cur_is_ascii ? " [hint: current bytes are printable ASCII — offset likely points to game string data, not code]" : "");
             mismatch_logged = 1;
           }
           if (debug_mode && mismatches && cJSON_GetArraySize(mismatches) < 32) {
@@ -2031,7 +2072,9 @@ handle_api_cheats_state(int fd, const char *query) {
                    off_matches == 0 && off_val_matches == 0) {
           /* All patches have reliable baseline and none match — true version mismatch */
           state = CHEAT_STATE_MISMATCH;
-          reason = "current bytes match neither ON nor expected/off";
+          reason = ff_hook > 0
+            ? "hook address reads 0xFF — base+offset lands in unmapped memory; try address mode 'absolute'"
+            : "current bytes match neither ON nor expected/off";
         } else if (off_matches == total && total > 0 && baseline_unknown == 0 && off_val_matches == 0) {
           state = CHEAT_STATE_OFF;
         } else if ((off_matches + off_val_matches) == total && total > 0 &&
@@ -2047,7 +2090,9 @@ handle_api_cheats_state(int fd, const char *query) {
           reason = "MC4/SHN: no reliable original bytes; state cannot be confirmed";
         } else {
           state = CHEAT_STATE_MIXED;
-          reason = "some writes differ";
+          reason = ff_hook > 0
+            ? "hook address reads 0xFF — base+offset may be in unmapped memory"
+            : "some writes differ";
         }
       }
     }
@@ -2070,7 +2115,7 @@ handle_api_cheats_state(int fd, const char *query) {
         if (strcmp(g_crash_suspects[_ci].title_id, title_id) == 0 &&
             g_crash_suspects[_ci].mod_index == mod_index) {
           state = CHEAT_STATE_CRASH_SUSPECT;
-          reason = "Game stopped shortly after enabling this cheat.";
+          reason = "Game stopped shortly after enabling. Use 'Clear Crash Flags' to re-enable.";
           break;
         }
       }
@@ -3818,7 +3863,10 @@ handle_api_dev_memtest(int fd) {
         intptr_t pg = (intptr_t)ROUND_PG_DOWN((uintptr_t)rgs.image_base);
         size_t sp = (size_t)0x4000;
         int orig_prot = kernel_get_vmem_protection(rgs.pid, pg, sp);
-        mprotect_rc = kernel_mprotect(rgs.pid, pg, sp, PROT_READ | PROT_WRITE | PROT_EXEC);
+        /* This is a read-only probe — only ensure the page is readable+executable.
+         * Never set W+X (PROT_WRITE | PROT_EXEC): PS5's hypervisor enforces W^X and
+         * a writable+executable code mapping can trigger a kernel panic. */
+        mprotect_rc = kernel_mprotect(rgs.pid, pg, sp, PROT_READ | PROT_EXEC);
         if (mprotect_rc == 0) {
           attach_rc = pt_attach_timed(rgs.pid, 2000);
           if (attach_rc == 0) {
@@ -4339,187 +4387,6 @@ handle_api_cheats_mc4_debug(int fd, const char *query) {
 }
 
 void
-handle_api_cr_eboot(int fd, const char *query) {
-  char raw_title[32] = {0};
-  char title_id[10] = {0};
-
-  if (query_value(query, "titleId", raw_title, sizeof(raw_title)) != 0 ||
-      !title_id_normalize(raw_title, title_id)) {
-    http_send_json(fd, 400, "{\"ok\":false,\"error\":\"bad titleId\"}");
-    return;
-  }
-
-  char cache_dir[280], cache_path[320];
-  snprintf(cache_dir,  sizeof(cache_dir),  "/data/cheatrunner/eboot/%s", title_id);
-  snprintf(cache_path, sizeof(cache_path), "%s/eboot.dec", cache_dir);
-
-  int force_redump = 0;
-  {
-    char force_s[8] = {0};
-    if (query_value(query, "force", force_s, sizeof(force_s)) == 0 && atoi(force_s) != 0)
-      force_redump = 1;
-  }
-
-  /* Return cached copy immediately if present and force=1 not requested. */
-  struct stat st;
-  if (!force_redump && stat(cache_path, &st) == 0 && st.st_size > 0x40) {
-    char body[512];
-    snprintf(body, sizeof(body),
-             "{\"ok\":true,\"path\":\"%s\",\"size\":%lld,\"cached\":true}",
-             cache_path, (long long)st.st_size);
-    http_send_json(fd, 200, body);
-    return;
-  }
-
-  pid_t pid = -1;
-  intptr_t base = 0;
-  char running[16] = {0};
-  if (get_running_game(&pid, running, sizeof(running), &base) != 0 || base <= 0) {
-    http_send_json(fd, 503,
-                   "{\"ok\":false,\"error\":\"no game running — launch the game first\"}");
-    return;
-  }
-
-  char run_norm[10], want_norm[10];
-  if (!title_id_normalize(running, run_norm) ||
-      !title_id_normalize(title_id, want_norm) ||
-      strcmp(run_norm, want_norm) != 0) {
-    http_send_json(fd, 409,
-                   "{\"ok\":false,\"error\":\"running game does not match requested title\"}");
-    return;
-  }
-
-  if (pt_attach(pid) < 0) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"pt_attach failed\"}");
-    return;
-  }
-
-  /* Read ELF64 header at image base. */
-  uint8_t ehdr[64];
-  if (pt_copyout(pid, base, ehdr, sizeof(ehdr)) < 0 ||
-      memcmp(ehdr, "\x7f""ELF", 4) != 0) {
-    pt_detach(pid, 0);
-    http_send_json(fd, 500,
-                   "{\"ok\":false,\"error\":\"could not read ELF header at image base\"}");
-    return;
-  }
-
-  uint64_t e_phoff     = *(uint64_t *)(ehdr + 32);
-  uint16_t e_phentsize = *(uint16_t *)(ehdr + 54);
-  uint16_t e_phnum     = *(uint16_t *)(ehdr + 56);
-
-  if (e_phnum == 0 || e_phnum > 64 || e_phentsize < 56) {
-    pt_detach(pid, 0);
-    http_send_json(fd, 500,
-                   "{\"ok\":false,\"error\":\"invalid ELF program header count/size\"}");
-    return;
-  }
-
-  size_t phdrs_sz = (size_t)e_phnum * e_phentsize;
-  uint8_t *phdrs = malloc(phdrs_sz);
-  if (!phdrs) { pt_detach(pid, 0); http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
-
-  if (pt_copyout(pid, base + (intptr_t)e_phoff, phdrs, phdrs_sz) < 0) {
-    free(phdrs); pt_detach(pid, 0);
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"could not read program headers\"}");
-    return;
-  }
-
-  /* Walk PT_LOAD segments to find the total mapped extent. */
-  intptr_t map_end = base;
-  for (int i = 0; i < e_phnum; i++) {
-    uint8_t *ph       = phdrs + i * e_phentsize;
-    uint32_t p_type   = *(uint32_t *)(ph +  0);
-    uint64_t p_vaddr  = *(uint64_t *)(ph + 16);
-    uint64_t p_filesz = *(uint64_t *)(ph + 32);
-    if (p_type != 1 /* PT_LOAD */ || p_filesz == 0) continue;
-    intptr_t seg_end = base + (intptr_t)p_vaddr + (intptr_t)p_filesz;
-    if (seg_end > map_end) map_end = seg_end;
-  }
-  free(phdrs);
-
-  size_t total = (size_t)(map_end - base);
-  if (total < 0x1000 || total > 256u * 1024 * 1024) {
-    pt_detach(pid, 0);
-    http_send_json(fd, 500,
-                   "{\"ok\":false,\"error\":\"ELF mapped size out of expected range\"}");
-    return;
-  }
-
-  uint8_t *elf_buf = malloc(total);
-  if (!elf_buf) { pt_detach(pid, 0); http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
-
-  /* Read in 64 KB chunks to avoid ptrace size limits. */
-  size_t off = 0;
-  int read_ok = 1;
-  while (off < total) {
-    size_t chunk = total - off;
-    if (chunk > 0x10000) chunk = 0x10000;
-    if (pt_copyout(pid, base + (intptr_t)off, elf_buf + off, chunk) < 0) {
-      read_ok = 0; break;
-    }
-    off += chunk;
-  }
-  pt_detach(pid, 0);
-
-  if (!read_ok) {
-    free(elf_buf);
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"memory read failed mid-dump\"}");
-    return;
-  }
-
-  ensure_dir_recursive(cache_dir);
-
-  if (write_file_atomic(cache_path, elf_buf, total) != 0) {
-    free(elf_buf);
-    unlink(cache_path);
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"cache write failed\"}");
-    return;
-  }
-  free(elf_buf);
-
-  /* Write the image base used for this dump so the static probe can compute
-   * correct file offsets even when ASLR shifts the base between boots. */
-  {
-    char base_path[320];
-    snprintf(base_path, sizeof(base_path), "%s/eboot.base", cache_dir);
-    FILE *bf = fopen(base_path, "w");
-    if (bf) {
-      fprintf(bf, "0x%lx\n", (unsigned long)base);
-      fclose(bf);
-    }
-  }
-
-  char body[512];
-  snprintf(body, sizeof(body),
-           "{\"ok\":true,\"path\":\"%s\",\"size\":%zu,\"cached\":false}",
-           cache_path, total);
-  http_send_json(fd, 200, body);
-}
-
-void
-handle_api_cr_eboot_delete(int fd, const char *query) {
-  char raw_title[32] = {0};
-  char title_id[10] = {0};
-  if (query_value(query, "titleId", raw_title, sizeof(raw_title)) != 0 ||
-      !title_id_normalize(raw_title, title_id)) {
-    http_send_json(fd, 400, "{\"ok\":false,\"error\":\"bad titleId\"}");
-    return;
-  }
-  char cache_dir[280], dec_path[320], base_path[320];
-  snprintf(cache_dir,  sizeof(cache_dir),  "/data/cheatrunner/eboot/%s", title_id);
-  snprintf(dec_path,   sizeof(dec_path),   "%s/eboot.dec",  cache_dir);
-  snprintf(base_path,  sizeof(base_path),  "%s/eboot.base", cache_dir);
-  int dec_ok  = (unlink(dec_path)  == 0 || errno == ENOENT);
-  int base_ok = (unlink(base_path) == 0 || errno == ENOENT);
-  if (dec_ok && base_ok) {
-    http_send_json(fd, 200, "{\"ok\":true}");
-  } else {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"delete failed\"}");
-  }
-}
-
-void
 handle_api_cheats_disable_all(int fd, const char *query) {
   char raw_title_id[32] = {0};
   char title_id[10] = {0};
@@ -4608,6 +4475,8 @@ http_route(int fd, const char *method, const char *path, const char *query, cons
   if (cr_api_patches_handle(fd, method, path, query, body, body_len)) return;
   if (cr_api_sources_handle(fd, method, path, query, body, body_len)) return;
   if (cr_api_logs_handle(fd, method, path, query, body, body_len)) return;
+  if (cr_api_fan_handle(fd, method, path, query, body, body_len)) return;
+  if (cr_api_profile_handle(fd, method, path, query, body, body_len)) return;
   /* shutdown needs token_header + client_ip - handle directly */
   if (!strcmp(path, "/api/dev/shutdown")) {
     handle_api_dev_shutdown(fd, method, query, token_header, client_ip);

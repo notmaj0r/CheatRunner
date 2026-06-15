@@ -31,6 +31,8 @@
 #define CHEATRUNNER_ADDR_CACHE_PATH     "/data/cheatrunner/addr_cache.json"
 #define CHEATRUNNER_TITLE_PREFS_PATH    "/data/cheatrunner/title_prefs.json"
 #define CHEATRUNNER_FAVORITES_PATH      "/data/cheatrunner/favorites.json"
+#define CHEATRUNNER_FAN_PATH            "/data/cheatrunner/fan.json"
+#define CHEATRUNNER_CRASH_LOG_PATH      "/data/cheatrunner/crash.log"
 
 /* General utilities */
 void     str_trim(char *s);

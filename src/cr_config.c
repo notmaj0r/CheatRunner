@@ -68,6 +68,8 @@ cheatrunner_config_t g_cfg = {
     .cheat_codecave_fallback = 1,
     .cheat_addr_cache_enabled = 1,
     .cheat_inter_mod_delay_ms = 0,
+    .fan_min_c = 30,
+    .fan_max_c = 90,
 };
 
 void
@@ -125,6 +127,8 @@ config_set_defaults(cheatrunner_config_t *cfg) {
       .cheat_codecave_fallback = 0,
       .cheat_addr_cache_enabled = 1,
       .cheat_inter_mod_delay_ms = 0,
+      .fan_min_c = 30,
+      .fan_max_c = 90,
   };
 }
 
@@ -181,6 +185,8 @@ config_save_locked(void) {
       "cheat_codecave_fallback=%d\n"
       "cheat_addr_cache_enabled=%d\n"
       "cheat_inter_mod_delay_ms=%d\n"
+      "fan_min_c=%d\n"
+      "fan_max_c=%d\n"
       "theme=%s\n",
       g_cfg.http_port, g_cfg.auto_load_cheat_menu,
       g_cfg.auto_download_missing_cheat, g_cfg.launch_kill_current,
@@ -205,6 +211,7 @@ config_save_locked(void) {
       g_cfg.games_cache_ttl_ms, g_cfg.appdb_debug_names, g_cfg.log_level,
       g_cfg.cheat_master_code_fixup, g_cfg.cheat_codecave_fallback,
       g_cfg.cheat_addr_cache_enabled, g_cfg.cheat_inter_mod_delay_ms,
+      g_cfg.fan_min_c, g_cfg.fan_max_c,
       g_cfg.theme);
   if (n <= 0 || (size_t)n >= sizeof(txt)) {
     return -1;
@@ -352,6 +359,12 @@ config_load(void) {
       g_cfg.dev_shutdown_delay_ms = atoi(v);
     } else if (!strcmp(k, "theme")) {
       snprintf(g_cfg.theme, sizeof(g_cfg.theme), "%s", v);
+    } else if (!strcmp(k, "fan_min_c")) {
+      int cv = atoi(v);
+      g_cfg.fan_min_c = (cv >= 10 && cv <= 60) ? cv : 30;
+    } else if (!strcmp(k, "fan_max_c")) {
+      int cv = atoi(v);
+      g_cfg.fan_max_c = (cv >= 50 && cv <= 100) ? cv : 90;
     }
   }
   fclose(fp);

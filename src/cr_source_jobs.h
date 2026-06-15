@@ -2,6 +2,7 @@
 #define CR_SOURCE_JOBS_H
 
 #include <pthread.h>
+#include <stddef.h>
 #include <time.h>
 
 #include "third_party/cJSON.h"
@@ -33,6 +34,8 @@ typedef struct {
   int http_status;
   time_t created_at;
   int used;
+  size_t dl_recv;   /* bytes received so far (download jobs only) */
+  size_t dl_total;  /* Content-Length from server; 0 if unknown    */
 } cr_source_job_t;
 
 extern pthread_mutex_t g_jobs_lock;

@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -300,7 +301,13 @@ http_server_thread(void *arg) {
     }
 
     int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR,  &opt, sizeof(opt));
+    /* SO_REUSEPORT lets a new instance bind immediately even if the old
+     * process is still alive (e.g. stuck in uninterruptible kernel sleep
+     * after SIGKILL).  The old listener dies within milliseconds once it
+     * wakes from sleep; until then the kernel distributes new connections
+     * between both sockets — harmless given the overlap is extremely brief. */
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -347,12 +354,17 @@ http_server_thread(void *arg) {
     g_http_listen_fd = listen_fd;
 
     {
-      char ip[64] = "127.0.0.1";
+      char ip[64];
       local_ip(ip, sizeof(ip));
-      snprintf(g_listen_ip, sizeof(g_listen_ip), "%s", ip);
-      log_msg("Listening on: %s:%d", ip, http_port);
+      /* After a socket reopen (e.g. ECONNABORTED when a game exits), the
+       * network interface may reset briefly and local_ip() transiently
+       * returns "127.0.0.1".  Keep the last known real LAN address so that
+       * dashboard QR/URL links remain valid. */
+      if (strcmp(ip, "127.0.0.1") != 0)
+        snprintf(g_listen_ip, sizeof(g_listen_ip), "%s", ip);
+      log_msg("Listening on: %s:%d", g_listen_ip, http_port);
       if (!g_http_listen_notified) {
-        notify("Listening on: %s:%d", ip, http_port);
+        notify("Listening on: %s:%d", g_listen_ip, http_port);
         g_http_listen_notified = 1;
       }
     }
@@ -373,6 +385,7 @@ http_server_thread(void *arg) {
         log_msg("[HTTP] accept() failed: %d — reopening socket", errno);
         break;
       }
+      { int nd = 1; setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd)); }
       char client_ip[64] = {0};
       inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
 

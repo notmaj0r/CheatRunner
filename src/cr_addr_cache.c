@@ -222,6 +222,48 @@ addr_cache_set(const char *path, time_t mtime, int mod_idx, int entry_idx, intpt
 }
 
 void
+addr_cache_clear_entry(const char *path, time_t mtime, int mod_idx, int entry_idx) {
+    if (!path) return;
+    char key[384];
+    make_key(key, sizeof(key), path, mtime, mod_idx, entry_idx);
+
+    pthread_mutex_lock(&g_addr_cache_lock);
+    for (int i = 0; i < g_addr_cache_n; i++) {
+        if (strcmp(g_addr_cache[i].key, key) == 0) {
+            for (int j = i; j < g_addr_cache_n - 1; j++)
+                g_addr_cache[j] = g_addr_cache[j+1];
+            g_addr_cache_n--;
+            addr_cache_save_locked();
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_addr_cache_lock);
+}
+
+void
+addr_cache_clear_for_title(const char *title_id) {
+    if (!title_id || !title_id[0]) return;
+
+    pthread_mutex_lock(&g_addr_cache_lock);
+    int removed = 0;
+    int i = 0;
+    while (i < g_addr_cache_n) {
+        if (strstr(g_addr_cache[i].key, title_id) != NULL) {
+            for (int j = i; j < g_addr_cache_n - 1; j++)
+                g_addr_cache[j] = g_addr_cache[j+1];
+            g_addr_cache_n--;
+            removed++;
+        } else {
+            i++;
+        }
+    }
+    addr_cache_save_locked();
+    pthread_mutex_unlock(&g_addr_cache_lock);
+    cr_log("info", "addr_cache", "cleared %d %s for title=%s (new game session)",
+           removed, removed == 1 ? "entry" : "entries", title_id);
+}
+
+void
 addr_cache_clear_for_path(const char *path) {
     if (!path) return;
     char prefix[384];

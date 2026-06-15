@@ -186,10 +186,12 @@ mc4_decrypt_to_xml(const char *cipher, size_t cipher_len, size_t *xml_size_out) 
     const char *from;
     char to;
   } repl[] = {
-      {"&lt;", '<'},
-      {"&gt;", '>'},
-      {"\\&quot;", '"'},
-      {"&quot;", '"'},
+      {"&lt;",    '<'},
+      {"&gt;",    '>'},
+      {"\\&quot;",'"'},
+      {"&quot;",  '"'},
+      {"&apos;",  '\''},
+      {"&amp;",   '&'},   /* must be last — avoids re-expanding already-decoded & */
   };
 
   size_t out_len = strlen(xml);
@@ -363,10 +365,14 @@ shn_xml_to_json(const char *xml, size_t xml_len) {
       size_t on_l = 0;
       size_t off2_l = 0;
       size_t abs_l = 0;
-      const char *off = xml_find_child(chunk, "Offset", &off_l);
-      const char *on = xml_find_child(chunk, "ValueOn", &on_l);
-      const char *off2 = xml_find_child(chunk, "ValueOff", &off2_l);
-      const char *abs_ = xml_find_child(chunk, "Absolute", &abs_l);
+      size_t exp_l = 0;
+      size_t mod_l = 0;
+      const char *off  = xml_find_child(chunk, "Offset",     &off_l);
+      const char *on   = xml_find_child(chunk, "ValueOn",    &on_l);
+      const char *off2 = xml_find_child(chunk, "ValueOff",   &off2_l);
+      const char *abs_ = xml_find_child(chunk, "Absolute",   &abs_l);
+      const char *exp_ = xml_find_child(chunk, "Expected",   &exp_l);
+      const char *mod_ = xml_find_child(chunk, "ModuleName", &mod_l);
       size_t sec_l = 0;
       const char *sec_ = xml_find_child(chunk, "Section", &sec_l);
       int section_num = 0;
@@ -387,6 +393,16 @@ shn_xml_to_json(const char *xml, size_t xml_len) {
         cheat_buf_puts(&out, "\",\"off\":\"");
         cheat_buf_puts_json(&out, off2, off2_l);
         cheat_buf_puts(&out, "\"");
+        if (exp_ && exp_l > 0) {
+          cheat_buf_puts(&out, ",\"expected\":\"");
+          cheat_buf_puts_json(&out, exp_, exp_l);
+          cheat_buf_puts(&out, "\"");
+        }
+        if (mod_ && mod_l > 0) {
+          cheat_buf_puts(&out, ",\"module_name\":\"");
+          cheat_buf_puts_json(&out, mod_, mod_l);
+          cheat_buf_puts(&out, "\"");
+        }
         if (abs_ && abs_l > 0 &&
             (!strncasecmp(abs_, "true", 4) || abs_[0] == '1')) {
           cheat_buf_puts(&out, ",\"absolute\":true");

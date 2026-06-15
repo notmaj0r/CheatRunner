@@ -257,6 +257,7 @@ appdb_collect_games_sqlite(game_entry_t *entries, size_t *count) {
   int has_content_id = has_contentinfo && appdb_table_has_column(db, "tbl_contentinfo", "contentId");
   int has_sort_priority = has_appbrowse && appdb_table_has_column(db, "tbl_appbrowse", "sortPriority");
   int has_appinfo    = appdb_table_exists(db, "tbl_appinfo");
+  int has_play_time  = has_appbrowse && appdb_table_has_column(db, "tbl_appbrowse", "playTime");
 
   if (has_appbrowse && has_contentinfo && has_content_id && has_browse_name && has_content_name && has_sort_priority) {
     sql = "SELECT DISTINCT b.titleId, COALESCE(b.titleName,''), COALESCE(c.titleName,''), COALESCE(c.contentId,''), "
@@ -390,6 +391,53 @@ appdb_collect_games_sqlite(game_entry_t *entries, size_t *count) {
   }
 
   rc = 0;
+
+  /* Read native PS5 playtime from tbl_appbrowse.playTime (seconds, if column exists) */
+  if (has_play_time && *count > 0) {
+    sqlite3_stmt *pt_st = NULL;
+    if (sqlite3_prepare_v2(db,
+          "SELECT titleId, COALESCE(playTime,0) FROM tbl_appbrowse WHERE playTime > 0",
+          -1, &pt_st, NULL) == SQLITE_OK) {
+      while (sqlite3_step(pt_st) == SQLITE_ROW) {
+        const unsigned char *pt_id = sqlite3_column_text(pt_st, 0);
+        sqlite3_int64 pt_val = sqlite3_column_int64(pt_st, 1);
+        if (!pt_id || !pt_id[0] || pt_val <= 0) continue;
+        char pt_norm[10];
+        if (!title_id_normalize((const char *)pt_id, pt_norm)) continue;
+        for (size_t k = 0; k < *count; k++) {
+          if (strcmp(entries[k].title_id, pt_norm) == 0) {
+            entries[k].play_time_seconds = (uint64_t)pt_val;
+            break;
+          }
+        }
+      }
+      sqlite3_finalize(pt_st);
+    }
+  }
+
+  /* Read last access time from tbl_contentinfo.lastAccessTime */
+  if (has_contentinfo && *count > 0) {
+    sqlite3_stmt *la_st = NULL;
+    if (sqlite3_prepare_v2(db,
+          "SELECT titleId, CAST(strftime('%s', lastAccessTime) AS INTEGER) "
+          "FROM tbl_contentinfo WHERE lastAccessTime IS NOT NULL AND lastAccessTime != ''",
+          -1, &la_st, NULL) == SQLITE_OK) {
+      while (sqlite3_step(la_st) == SQLITE_ROW) {
+        const unsigned char *la_id = sqlite3_column_text(la_st, 0);
+        sqlite3_int64 la_ts = sqlite3_column_int64(la_st, 1);
+        if (!la_id || !la_id[0] || la_ts <= 0) continue;
+        char la_norm[10];
+        if (!title_id_normalize((const char *)la_id, la_norm)) continue;
+        for (size_t k = 0; k < *count; k++) {
+          if (strcmp(entries[k].title_id, la_norm) == 0) {
+            entries[k].last_access_time = (uint64_t)la_ts;
+            break;
+          }
+        }
+      }
+      sqlite3_finalize(la_st);
+    }
+  }
 
 done:
   if (st) {

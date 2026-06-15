@@ -57,10 +57,10 @@ find_pid_by_name(const char *name) {
   for (uint8_t *ptr = buf; ptr < (buf + buf_size);) {
     int ki_structsize = *(int *)ptr;
     if (ki_structsize <= 0 || (size_t)ki_structsize > (size_t)((buf + buf_size) - ptr)) break;
-    /* ki_pid is at +72 and ki_tdname (a NUL-terminated name array) at +447. Skip
-     * any record too short to contain those fields rather than read into the next
-     * record — or past the buffer end on the final record. */
-    if (ki_structsize <= 467) { ptr += ki_structsize; continue; }
+    /* ki_pid at +72, ki_comm at +447 (MAXCOMLEN+1 = 20 bytes, last byte at 466).
+     * Need structsize >= 467; strict-less-than avoids off-by-one that would
+     * skip a record of exactly the minimum valid size. */
+    if (ki_structsize < 467) { ptr += ki_structsize; continue; }
     pid_t ki_pid = *(pid_t *)&ptr[72];
     char *ki_tdname = (char *)&ptr[447];
     ptr += ki_structsize;
@@ -93,7 +93,7 @@ find_pid_for_app_id(uint32_t app_id) {
   for (uint8_t *ptr = buf; ptr < (buf + buf_size);) {
     int ki_structsize = *(int *)ptr;
     if (ki_structsize <= 0 || (size_t)ki_structsize > (size_t)((buf + buf_size) - ptr)) break;
-    if (ki_structsize <= 76) { ptr += ki_structsize; continue; }  /* ki_pid at +72 */
+    if (ki_structsize < 76) { ptr += ki_structsize; continue; }  /* ki_pid at +72, 4 bytes, last at +75; need >= 76 */
     pid_t pid = *(pid_t *)&ptr[72];
     ptr += ki_structsize;
     memset(&info, 0, sizeof(info));
@@ -208,41 +208,74 @@ read_running_state(running_game_state_t *out) {
    *
    * The old "/proc/{pid}/root/user/patch/{title}/..." path was wrong: PS5 updates are
    * mounted as patch0 inside the game's namespace, not under user/patch/. */
-  char proc_root[32];
-  snprintf(proc_root, sizeof(proc_root), "/proc/%d/root", (int)pid);
+  /* Per-pid version cache. Once a pid's version is known we never re-probe its
+   * filesystem again. Critical for robustness: reading /proc/{pid}/root/... of a
+   * FROZEN game (e.g. after a cave cheat strips WRITE and the game's next store
+   * page-faults) blocks the calling thread indefinitely in kernel VFS — this is
+   * what took CheatRunner down (monitor + HTTP threads all stuck → "network
+   * error" → resend ELF). A pid's game version never changes during its life, so
+   * caching is safe and also eliminates redundant per-500ms filesystem I/O. */
+  static pthread_mutex_t ver_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+  static pid_t ver_cache_pid = -1;
+  static char  ver_cache_cv[32];
+  static char  ver_cache_av[32];
+  int ver_cache_hit = 0;
+  pthread_mutex_lock(&ver_cache_lock);
+  if (ver_cache_pid == pid && (ver_cache_cv[0] || ver_cache_av[0])) {
+    snprintf(st.content_version, sizeof(st.content_version), "%s", ver_cache_cv);
+    snprintf(st.app_version, sizeof(st.app_version), "%s", ver_cache_av);
+    ver_cache_hit = 1;
+  }
+  pthread_mutex_unlock(&ver_cache_lock);
 
-  /* Probe patch0 then app0 via proc namespace for both version fields */
-  {
-    const char *const subdirs[] = { "patch0", "app0", NULL };
-    for (int _si = 0; subdirs[_si] && !st.content_version[0]; _si++) {
-      char dir[128];
-      snprintf(dir, sizeof(dir), "%s/%s", proc_root, subdirs[_si]);
-      read_param_value_from_dir(dir, "contentVersion", st.content_version, sizeof(st.content_version));
+  if (!ver_cache_hit) {
+    char proc_root[32];
+    snprintf(proc_root, sizeof(proc_root), "/proc/%d/root", (int)pid);
+
+    /* Probe patch0 then app0 via proc namespace for both version fields */
+    {
+      const char *const subdirs[] = { "patch0", "app0", NULL };
+      for (int _si = 0; subdirs[_si] && !st.content_version[0]; _si++) {
+        char dir[128];
+        snprintf(dir, sizeof(dir), "%s/%s", proc_root, subdirs[_si]);
+        read_param_value_from_dir(dir, "contentVersion", st.content_version, sizeof(st.content_version));
+      }
+      for (int _si = 0; subdirs[_si] && !st.app_version[0]; _si++) {
+        char dir[128];
+        snprintf(dir, sizeof(dir), "%s/%s", proc_root, subdirs[_si]);
+        read_param_value_from_dir(dir, "appVersion", st.app_version, sizeof(st.app_version));
+      }
     }
-    for (int _si = 0; subdirs[_si] && !st.app_version[0]; _si++) {
-      char dir[128];
-      snprintf(dir, sizeof(dir), "%s/%s", proc_root, subdirs[_si]);
-      read_param_value_from_dir(dir, "appVersion", st.app_version, sizeof(st.app_version));
+    /* Direct /app0 path (only useful if CheatRunner runs inside the game's sandbox) */
+    if (!st.content_version[0])
+      read_param_value_from_sfo("/app0/sce_sys/param.sfo", "contentVersion", st.content_version, sizeof(st.content_version));
+    if (!st.app_version[0])
+      read_param_value_from_sfo("/app0/sce_sys/param.sfo", "appVersion", st.app_version, sizeof(st.app_version));
+    /* Static installed paths (fast — no directory scan) */
+    if (!st.content_version[0])
+      read_param_value_by_title_id(title, "contentVersion", st.content_version, sizeof(st.content_version));
+    if (!st.app_version[0])
+      read_param_value_by_title_id(title, "appVersion", st.app_version, sizeof(st.app_version));
+    /* Last resort: scan /user/appmeta for the real content ID → sandbox path.
+     * This is the slowest path (directory listing) — only runs when all else fails. */
+    if (!st.content_version[0] && !st.app_version[0])
+      read_param_value_from_appmeta(title, "contentVersion", st.content_version, sizeof(st.content_version));
+    if (!st.content_version[0] && !st.app_version[0])
+      read_param_value_from_appmeta(title, "appVersion", st.app_version, sizeof(st.app_version));
+
+    /* Cache the result so this pid's frozen namespace is never re-probed. */
+    if (st.content_version[0] || st.app_version[0]) {
+      pthread_mutex_lock(&ver_cache_lock);
+      ver_cache_pid = pid;
+      snprintf(ver_cache_cv, sizeof(ver_cache_cv), "%s", st.content_version);
+      snprintf(ver_cache_av, sizeof(ver_cache_av), "%s", st.app_version);
+      pthread_mutex_unlock(&ver_cache_lock);
     }
   }
-  /* Direct /app0 path (only useful if CheatRunner runs inside the game's sandbox) */
-  if (!st.content_version[0])
-    read_param_value_from_sfo("/app0/sce_sys/param.sfo", "contentVersion", st.content_version, sizeof(st.content_version));
-  if (!st.app_version[0])
-    read_param_value_from_sfo("/app0/sce_sys/param.sfo", "appVersion", st.app_version, sizeof(st.app_version));
-  /* Static installed paths (fast — no directory scan) */
-  if (!st.content_version[0])
-    read_param_value_by_title_id(title, "contentVersion", st.content_version, sizeof(st.content_version));
-  if (!st.app_version[0])
-    read_param_value_by_title_id(title, "appVersion", st.app_version, sizeof(st.app_version));
-  /* Last resort: scan /user/appmeta for the real content ID → sandbox path.
-   * This is the slowest path (directory listing) — only runs when all else fails. */
-  if (!st.content_version[0] && !st.app_version[0])
-    read_param_value_from_appmeta(title, "contentVersion", st.content_version, sizeof(st.content_version));
-  if (!st.content_version[0] && !st.app_version[0])
-    read_param_value_from_appmeta(title, "appVersion", st.app_version, sizeof(st.app_version));
 
   if (!st.content_version[0] && !st.app_version[0]) {
+    char proc_root[32];
+    snprintf(proc_root, sizeof(proc_root), "/proc/%d/root", (int)pid);
     pthread_mutex_lock(&g_ver_warn_lock);
     if (strcmp(g_ver_warn_last.title_id, title) != 0 || g_ver_warn_last.pid != pid) {
       cr_log("warn", "game.ver", "version undetected title=%s pid=%d — tried %s/patch0, %s/app0, static paths",
@@ -414,6 +447,7 @@ rpc_refresh_title_and_notify(void) {
       notification_add("game_started", "Game started: %s", cur.title_id);
       cr_log("info", "game", "game started %s", cur.title_id);
       launch_status_recover_for_game(cur.title_id);
+      addr_cache_clear_for_title(cur.title_id);
     }
   }
 

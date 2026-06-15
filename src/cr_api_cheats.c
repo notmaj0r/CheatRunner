@@ -128,16 +128,6 @@ cr_api_cheats_handle(int fd, const char *method, const char *path,
     handle_api_cheats_select_auto(fd, query);
     return 1;
   }
-  /* /api/cr/eboot?titleId=<id>[&force=1] — dump decrypted ELF from running game memory */
-  if (!strcmp(path, "/api/cr/eboot")) {
-    handle_api_cr_eboot(fd, query);
-    return 1;
-  }
-  /* /api/cr/eboot/delete?titleId=<id> — delete cached eboot dump */
-  if (!strcmp(path, "/api/cr/eboot/delete")) {
-    handle_api_cr_eboot_delete(fd, query);
-    return 1;
-  }
   /* /api/cheats/disable-all?titleId=<id> — revert all active cheats for running game */
   if (!strcmp(path, "/api/cheats/disable-all")) {
     handle_api_cheats_disable_all(fd, query);

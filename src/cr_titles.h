@@ -2,13 +2,16 @@
 #define CR_TITLES_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct game_entry {
-  char title_id[16];
-  char title_name[256];
-  char content_id[96];
-  char name_source[32];
-  int  name_resolved;
+  char     title_id[16];
+  char     title_name[256];
+  char     content_id[96];
+  char     name_source[32];
+  int      name_resolved;
+  uint64_t play_time_seconds; /* reserved — tbl_appbrowse.playTime if ever present (0 otherwise) */
+  uint64_t last_access_time; /* unix timestamp from tbl_contentinfo.lastAccessTime (0 if unavailable) */
 } game_entry_t;
 
 int is_valid_title_id(const char *title_id);

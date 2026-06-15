@@ -15,6 +15,8 @@ typedef struct http_ctx {
   int tmpl_id;
   int conn_id;
   int req_id;
+  http_progress_fn_t pfn;
+  void              *pud;
 } http_ctx_t;
 
 int sceNetInit(void);
@@ -67,6 +69,8 @@ http_init(http_ctx_t *ctx, const char *agent, const char *url, int timeout_ms) {
   ctx->tmpl_id = -1;
   ctx->conn_id = -1;
   ctx->req_id = -1;
+  ctx->pfn = NULL;
+  ctx->pud = NULL;
 
   if ((err = sceNetInit()) < 0) {
     return err;
@@ -191,6 +195,9 @@ http_request(http_ctx_t *ctx, uint8_t **data, size_t *len, int *status_out, size
     return -2;
   }
 
+  /* cl_known==0 means Content-Length is present; probed holds its value. */
+  size_t progress_total = (cl_known == 0 && probed > 0) ? (size_t)probed : 0;
+
   size_t cap = (cl_known == 0 && probed > 0) ? (size_t)probed : 16384;
   if (max_bytes > 0 && cap > max_bytes) {
     cap = max_bytes;
@@ -236,6 +243,7 @@ http_request(http_ctx_t *ctx, uint8_t **data, size_t *len, int *status_out, size
       return -2;
     }
     off += (size_t)n;
+    if (ctx->pfn) ctx->pfn(off, progress_total, ctx->pud);
   }
 
   *data = buf;
@@ -287,8 +295,9 @@ http_get_url_ex(const char *agent, const char *url, size_t max_bytes,
 }
 
 int
-http_get_url_ex_timeout(const char *agent, const char *url, size_t max_bytes, int timeout_ms,
-                        int *status_out, uint8_t **data_out, size_t *len_out) {
+http_get_url_ex_timeout_progress(const char *agent, const char *url, size_t max_bytes, int timeout_ms,
+                                  int *status_out, uint8_t **data_out, size_t *len_out,
+                                  http_progress_fn_t pfn, void *pud) {
   http_ctx_t ctx;
   uint8_t *body = NULL;
   size_t body_len = 0;
@@ -324,6 +333,8 @@ http_get_url_ex_timeout(const char *agent, const char *url, size_t max_bytes, in
       rc = init_rc;
       break;
     }
+    ctx.pfn = pfn;
+    ctx.pud = pud;
     rc = http_request(&ctx, &body, &body_len, &status, max_bytes);
     http_fini(&ctx);
 
@@ -346,4 +357,11 @@ http_get_url_ex_timeout(const char *agent, const char *url, size_t max_bytes, in
   *data_out = body;
   *len_out = body_len;
   return 0;
+}
+
+int
+http_get_url_ex_timeout(const char *agent, const char *url, size_t max_bytes, int timeout_ms,
+                        int *status_out, uint8_t **data_out, size_t *len_out) {
+  return http_get_url_ex_timeout_progress(agent, url, max_bytes, timeout_ms,
+                                          status_out, data_out, len_out, NULL, NULL);
 }

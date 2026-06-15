@@ -34,10 +34,6 @@ void handle_api_debug_process(int fd, const char *query);
 void handle_api_status(int fd);
 void handle_api_state(int fd);
 
-/* ---- /api/cr/eboot — decrypted ELF dump from running game memory ---- */
-void handle_api_cr_eboot(int fd, const char *query);
-void handle_api_cr_eboot_delete(int fd, const char *query);
-
 /* ---- /api/cheats (local, non-remote) ---- */
 void handle_api_cheats_index(int fd);
 void handle_api_cheats_get(int fd, const char *query);

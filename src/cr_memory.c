@@ -15,9 +15,6 @@
 #include "ps5sdk_compat.h"
 #include "pt.h"
 
-#define ROUND_PG_DOWN(x) ((uintptr_t)(x) & ~(uintptr_t)0x3fff)
-#define ROUND_PG_UP(x) (((uintptr_t)(x) + 0x3fff) & ~(uintptr_t)0x3fff)
-
 static int
 hex_nibble(char c) {
   if (c >= '0' && c <= '9') return c - '0';
@@ -64,127 +61,114 @@ parse_hex_bytes_checked(const char *s, uint8_t *out, size_t out_cap, size_t *out
   return 0;
 }
 
+/* Canonical x86-64 user-space limit. Probe reads above this address risk
+ * hitting kernel space or PS5 MMIO regions that cause ptrace page-fault hangs. */
+#define ADDR_IN_USER_RANGE(a) ((intptr_t)(a) >= 0x1000L && (intptr_t)(a) <= (intptr_t)0x7FFFFFFFFFFFL)
+
 int
 read_process_memory(pid_t pid, intptr_t addr, uint8_t *out, size_t len) {
   if (!out || len == 0) return -1;
-  if (pt_copyout(pid, addr, out, len) < 0) return -1;
-  return 0;
-}
+  /* Fast path: data/heap pages are readable, so this succeeds for most reads
+   * and the page protection is never touched. */
+  if (pt_copyout(pid, addr, out, len) == 0) return 0;
 
-static void
-fmt_hex16(const uint8_t *b, size_t len, char *buf, size_t buf_sz) {
-  size_t n = len < 16 ? len : 16;
-  size_t pos = 0;
-  for (size_t i = 0; i < n && pos + 4 < buf_sz; i++) {
-    pos += (size_t)snprintf(buf + pos, buf_sz - pos, "%02x ", b[i]);
-  }
-  if (len > 16 && pos + 4 < buf_sz) {
-    snprintf(buf + pos, buf_sz - pos, "...");
-  }
-}
+  /* Slow path. PS5 maps game .text execute-only (PROT_EXEC, no PROT_READ), so a
+   * raw pt_copyout on code faults — this is why baseline reads of hook sites came
+   * back unreadable and cheats showed mismatch/partial. Temporarily add PROT_READ,
+   * re-read, then restore the page's ORIGINAL protection so W^X is preserved.
+   *
+   * Guard the address first: kernel_get_vmem_protection can panic on a bad pointer
+   * (the same reason write_process_memory_forced avoids it), so never call it for
+   * an address outside user space. */
+  if (!ADDR_IN_USER_RANGE(addr)) return -1;
 
-int
-write_process_memory_ex(pid_t pid, intptr_t addr, const uint8_t *data, size_t len,
-                         int *orig_prot_out) {
   intptr_t page = (intptr_t)ROUND_PG_DOWN((uintptr_t)addr);
-  size_t span = (size_t)(ROUND_PG_UP((uintptr_t)addr + len) - (uintptr_t)page);
+  size_t   span = (size_t)(ROUND_PG_UP((uintptr_t)addr + len) - (uintptr_t)page);
 
-  int orig_prot = kernel_get_vmem_protection(pid, page, span);
-  if (orig_prot < 0) {
-    cr_log("warn", "cheats.mem", "get_vmem_protection failed page=0x%lx span=0x%zx rc=%d — aborting write",
-           (long)page, span, orig_prot);
-    if (orig_prot_out) *orig_prot_out = -1;
-    return -5;
-  }
-  if (orig_prot_out) *orig_prot_out = orig_prot;
+  int op = kernel_get_vmem_protection(pid, page, span);
+  if (op < 0) return -1;            /* genuinely unmapped */
+  if (op & PROT_READ) return -1;    /* already readable — the read truly failed */
 
-  int mrc = kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
-  cr_log("debug", "cheats.mem", "mprotect_rwx page=0x%lx span=0x%zx orig_prot=%d rc=%d",
-         (long)page, span, orig_prot, mrc);
-  if (mrc != 0) return -4;
-
-  int wrc = pt_copyin(pid, data, addr, len);
-  cr_log("debug", "cheats.mem", "copyin addr=0x%lx len=%zu rc=%d", (long)addr, len, wrc);
-  if (wrc < 0) {
-    kernel_mprotect(pid, page, span, orig_prot);
-    return -1;
-  }
-
-  uint8_t vbuf[256];
-  size_t off = 0;
-  while (off < len) {
-    size_t chunk = len - off;
-    if (chunk > sizeof(vbuf)) chunk = sizeof(vbuf);
-    int rrc = pt_copyout(pid, addr + (intptr_t)off, vbuf, chunk);
-    if (rrc < 0) {
-      cr_log("warn", "cheats.mem", "int_verify_read failed addr=0x%lx off=%zu rc=%d restore_prot=%d",
-             (long)addr, off, rrc, orig_prot);
-      kernel_mprotect(pid, page, span, orig_prot);
-      return -2;
-    }
-    if (memcmp(vbuf, data + off, chunk) != 0) {
-      char exp_h[52] = {0}, got_h[52] = {0};
-      fmt_hex16(data + off, chunk, exp_h, sizeof(exp_h));
-      fmt_hex16(vbuf, chunk, got_h, sizeof(got_h));
-      cr_log("warn", "cheats.mem", "int_verify_mismatch addr=0x%lx off=%zu exp=[%s] got=[%s] restore_prot=%d",
-             (long)addr, off, exp_h, got_h, orig_prot);
-      kernel_mprotect(pid, page, span, orig_prot);
-      return -3;
-    }
-    off += chunk;
-  }
-
-  /* Restore original page protection — never leave RWX after a successful write. */
-  kernel_mprotect(pid, page, span, orig_prot);
-  cr_log("debug", "cheats.mem", "int_verify ok addr=0x%lx len=%zu prot_restored=%d", (long)addr, len, orig_prot);
-  return 0;
+  if (kernel_mprotect(pid, page, span, op | PROT_READ) != 0) return -1;
+  int rc = pt_copyout(pid, addr, out, len);
+  kernel_mprotect(pid, page, span, op);   /* restore original protection (keeps W^X) */
+  return rc < 0 ? -1 : 0;
 }
 
-int
-write_process_memory(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) {
-  return write_process_memory_ex(pid, addr, data, len, NULL);
-}
 
-/* Returns 1 if the first byte looks like a plausible x86-64 instruction start.
+/* Returns 1 if the first two bytes look like a plausible x86-64 instruction start.
  * Used to distinguish absolute vs relative SHN/MC4 offsets when no expected bytes exist.
- * A null first byte almost always means data/uninitialized memory, not code. */
+ * Using two bytes for REX-prefixed instructions cuts the false-positive rate significantly:
+ * 0x48 ("H") is common in ASCII strings and pointer data, but REX+valid_opcode is not. */
 static int
 x86_looks_like_code(const uint8_t *b, size_t len) {
   if (!b || len == 0) return 0;
-  uint8_t fb = b[0];
-  if (fb >= 0x40 && fb <= 0x4F) return 1; /* REX prefix — extremely common in 64-bit code */
-  switch (fb) {
-    case 0x0F: /* 2-byte escape (SSE, CMOV, MOVZX, …) */
-    case 0x29: case 0x2B:              /* SUB */
-    case 0x31: case 0x33:              /* XOR */
-    case 0x50: case 0x51: case 0x52: case 0x53: /* PUSH reg */
-    case 0x54: case 0x55: case 0x56: case 0x57:
-    case 0x58: case 0x59: case 0x5A: case 0x5B: /* POP reg */
-    case 0x5C: case 0x5D: case 0x5E: case 0x5F:
-    case 0x66:                         /* operand-size prefix */
-    case 0x72: case 0x73:              /* JB / JAE */
-    case 0x74: case 0x75:              /* JE / JNE */
-    case 0x7C: case 0x7D: case 0x7E: case 0x7F: /* JL / JGE / JLE / JG */
-    case 0x81: case 0x83: case 0x85:   /* ADD/SUB/AND/OR/CMP + TEST */
-    case 0x89: case 0x8B: case 0x8D:   /* MOV / LEA */
-    case 0x90:                         /* NOP */
-    case 0xB8: case 0xB9: case 0xBA: case 0xBB: /* MOV reg, imm64 */
+  uint8_t b0 = b[0];
+
+  /* Single-byte unambiguous instructions: PUSH/POP reg, NOP, RET */
+  if ((b0 >= 0x50 && b0 <= 0x5F) || b0 == 0x90 || b0 == 0xC3) return 1;
+
+  /* Unambiguous control-flow: CALL rel32, JMP rel32/rel8, Jcc rel8 */
+  if (b0 == 0xE8 || b0 == 0xE9 || b0 == 0xEB) return 1;
+  if (b0 >= 0x72 && b0 <= 0x7F) return 1;
+
+  /* All remaining checks require a second byte. */
+  if (len < 2) return 0;
+  uint8_t b1 = b[1];
+
+  /* REX prefix (0x40-0x4F) must be followed by a known opcode. */
+  if (b0 >= 0x40 && b0 <= 0x4F) {
+    switch (b1) {
+      case 0x01: case 0x03: case 0x09: case 0x0B: case 0x0F:
+      case 0x21: case 0x23: case 0x29: case 0x2B:
+      case 0x31: case 0x33: case 0x39: case 0x3B:
+      case 0x63: case 0x69: case 0x6B:
+      case 0x81: case 0x83: case 0x85: case 0x87: case 0x89: case 0x8B: case 0x8D:
+      case 0xC1: case 0xC7: case 0xD3: case 0xF7: case 0xFF:
+        return 1;
+      default: return 0;
+    }
+  }
+
+  /* 2-byte escape: 0x0F + known second byte */
+  if (b0 == 0x0F) {
+    switch (b1) {
+      case 0x10: case 0x11: case 0x1F:
+      case 0x28: case 0x29:
+      case 0x44: case 0x45: case 0x84: case 0x85: case 0x86: case 0x87:
+      case 0xAF: case 0xB6: case 0xB7: case 0xBE: case 0xBF:
+        return 1;
+      default: return 0;
+    }
+  }
+
+  /* Operand-size prefix + real opcode */
+  if (b0 == 0x66) {
+    switch (b1) {
+      case 0x0F: case 0x89: case 0x8B: case 0xC7: case 0xFF:
+        return 1;
+      default: return 0;
+    }
+  }
+
+  /* MOV/LEA/CMP/ADD/SUB/XOR/AND/TEST + ModRM.
+   * Exclude ModRM=0x00 ([rax]+no displacement) — too common in zeroed data. */
+  switch (b0) {
+    case 0x29: case 0x2B: case 0x31: case 0x33:
+    case 0x81: case 0x83: case 0x85:
+    case 0x89: case 0x8B: case 0x8D:
+    case 0xC7: case 0xFF:
+      return b1 != 0x00;
+    case 0xB8: case 0xB9: case 0xBA: case 0xBB:
     case 0xBC: case 0xBD: case 0xBE: case 0xBF:
-    case 0xC3: case 0xC7:              /* RET / MOV r/m, imm32 */
-    case 0xE8:                         /* CALL rel32 */
-    case 0xE9: case 0xEB:              /* JMP rel32 / rel8 */
-    case 0xF2: case 0xF3:              /* REP/REPNE prefix */
-    case 0xFF:                         /* CALL/JMP indirect, PUSH r/m, INC/DEC */
-      return 1;
+      return 1; /* MOV reg, imm64 */
+    case 0xF2: case 0xF3:
+      return (b1 == 0x0F || (b1 >= 0xA4 && b1 <= 0xAF)) ? 1 : 0;
     default:
       return 0;
   }
 }
 
-
-/* Canonical x86-64 user-space limit. Probe reads above this address risk
- * hitting kernel space or PS5 MMIO regions that cause ptrace page-fault hangs. */
-#define ADDR_IN_USER_RANGE(a) ((intptr_t)(a) >= 0x1000L && (intptr_t)(a) <= (intptr_t)0x7FFFFFFFFFFFL)
 
 intptr_t
 cheat_resolve_write_addr_ex(pid_t pid, intptr_t base, uint64_t off_u,
@@ -426,27 +410,90 @@ process_is_ps2_emu(pid_t pid) {
 
 int
 write_process_memory_forced(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) {
+  if (!ADDR_IN_USER_RANGE(addr)) {
+    cr_log("error", "cheats.mem",
+           "write_rejected addr=0x%lx not_in_user_range — skipping to prevent kernel hang",
+           (long)addr);
+    return -7;
+  }
+  /* Split cross-page writes at each page boundary.  kernel_mprotect with a
+   * multi-page span returns 0 on PS5 but silently only unlocks the first page;
+   * subsequent pages stay R-X and pt_copyin silently truncates the write.
+   * One mprotect+write per page is the only reliable approach. */
+  intptr_t next_page = (intptr_t)ROUND_PG_UP((uintptr_t)addr + 1);
+  if (addr + (intptr_t)len > next_page) {
+    size_t first = (size_t)(next_page - addr);
+    int r = write_process_memory_forced(pid, addr, data, first);
+    if (r != 0) return r;
+    return write_process_memory_forced(pid, next_page, data + first, len - first);
+  }
+
   intptr_t page = (intptr_t)ROUND_PG_DOWN((uintptr_t)addr);
   size_t   span = (size_t)(ROUND_PG_UP((uintptr_t)addr + len) - (uintptr_t)page);
-  int mrc = kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
-  cr_log("debug", "cheats.mem", "mprotect_rwx page=0x%lx span=0x%zx rc=%d",
+  /* W^X: make the page WRITABLE (drop EXEC) for the write, never W+X. PS5's
+   * hypervisor rejects a writable+executable code mapping; setting RWX — even
+   * momentarily — can trigger a delayed kernel panic when the page is next
+   * executed (this was the repeated PPSA30803 cheat-apply panic). We restore
+   * R-X after the write so the patched code stays executable but not writable. */
+  int mrc = kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE);
+  cr_log("debug", "cheats.mem", "mprotect_rw page=0x%lx span=0x%zx rc=%d",
          (long)page, span, mrc);
   if (mrc != 0) {
-    cr_log("info", "cheats.mem",
-           "mprotect_failed page=0x%lx rc=%d — codecave fallback addr=0x%lx len=%zu",
+    /* kernel_mprotect refused to make this page writable (special vmem entry,
+     * hardware-enforced protection, or PS5 integrity guard).
+     *
+     * Strategy:
+     *   1. Try pt_copyin without mprotect — ptrace on a jailbroken PS5 can
+     *      often write to protected pages directly.
+     *   2. If that also fails AND the write is a large cave (>=16 bytes):
+     *      try write_via_codecave (remaps the page with MAP_FIXED).
+     *   3. For small hook writes (<16 bytes): NEVER remap — MAP_FIXED on a
+     *      kernel-protected code page causes a kernel panic when the page is
+     *      executed. Fail cleanly instead. */
+    cr_log("warn", "cheats.mem",
+           "mprotect_failed page=0x%lx rc=%d — trying direct ptrace write addr=0x%lx len=%zu",
            (long)page, mrc, (long)addr, len);
-    return write_via_codecave(pid, addr, data, len);
+    int drc = pt_copyin(pid, data, addr, len);
+    if (drc == 0) {
+      cr_log("info", "cheats.mem",
+             "direct_ptrace_write ok addr=0x%lx len=%zu (mprotect was refused)", (long)addr, len);
+      return 0;
+    }
+    cr_log("warn", "cheats.mem",
+           "direct_ptrace_write failed addr=0x%lx len=%zu rc=%d", (long)addr, len, drc);
+    if (len >= 16) {
+      cr_log("info", "cheats.mem",
+             "codecave_remap fallback addr=0x%lx len=%zu (large cave write)", (long)addr, len);
+      return write_via_codecave(pid, addr, data, len);
+    }
+    cr_log("error", "cheats.mem",
+           "hook_write_blocked addr=0x%lx len=%zu — page is kernel-protected and cannot be remapped safely; skipping to prevent kernel panic",
+           (long)addr, len);
+    return -6;
   }
   int wrc = pt_copyin(pid, data, addr, len);
   cr_log("debug", "cheats.mem", "copyin addr=0x%lx len=%zu rc=%d", (long)addr, len, wrc);
-  /* Leave the page READ|WRITE|EXEC. Forcing it back to R-X stripped WRITE from the
-   * page — fine for a hook in a pure code page, but MC4/SHN code caves frequently
-   * land in a page the GAME also writes to (the cave region sits well past .text,
-   * in mixed data). Removing write from such a page makes the game's next store
-   * there page-fault → freeze shortly after the cheat is applied. Keeping the page
-   * RWX (it was already RWX for the copyin) preserves both execution of the cave
-   * and the game's own writes. */
-  kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
+  /* Restore R-X (drop WRITE, re-add EXEC). Combined with the RW mprotect above,
+   * the page is never Writable+eXecutable at the same instant — satisfying PS5's
+   * hypervisor W^X rule. Future writes go through pt_copyin (ptrace PT_IO), which
+   * bypasses page protection on a jailbroken PS5, so dropping WRITE here is safe. */
+  int rrc = kernel_mprotect(pid, page, span, PROT_READ | PROT_EXEC);
+  if (rrc != 0) {
+    /* Restore failed. On PS4 BC pages the emulation layer manages page protections
+     * independently — mprotect(RX) is rejected but the hardware PTE still allows
+     * execution, so the written bytes execute correctly. Returning success here
+     * matches the pre-existing behaviour that patches on Bloodborne and similar
+     * PS4 BC titles depended on. */
+    cr_log("warn", "cheats.mem",
+           "restore_rx_failed page=0x%lx span=0x%zx rc=%d", (long)page, span, rrc);
+  }
+  if (wrc == 0 && len <= 128) {
+    uint8_t vbuf[128];
+    if (pt_copyout(pid, addr, vbuf, len) == 0 && memcmp(vbuf, data, len) != 0)
+      cr_log("warn", "cheats.mem",
+             "write_verify_mismatch addr=0x%lx len=%zu — bytes did not change after write",
+             (long)addr, len);
+  }
   return (wrc < 0) ? -1 : 0;
 }
 
@@ -482,20 +529,20 @@ write_via_codecave(pid_t pid, intptr_t addr, const uint8_t *data, size_t len) {
   pt_copyin(pid, orig, page, span);
   pt_copyin(pid, data, addr, len);
 
-  /* Leave the cave RWX. This page now backs a code cave the game jumps into and
-   * may also write through; stripping write could fault the game. */
-  kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
+  /* Set R-X before verify. Never leave a page RWX — PS5's memory integrity
+   * scanner panics on executable+writable pages. pt_copyin (ptrace PT_IO)
+   * bypasses page protections on jailbroken PS5, so the rollback write below
+   * works without needing to re-elevate to RWX. */
+  kernel_mprotect(pid, page, span, PROT_READ | PROT_EXEC);
 
   /* Verify */
   uint8_t vbuf[256];
   if (pt_copyout(pid, addr, vbuf, len) < 0 || memcmp(vbuf, data, len) != 0) {
     cr_log("warn", "cheats.cave",
            "cave verify failed addr=0x%lx len=%zu — restoring original page", (long)addr, len);
-    /* Roll the page back to its original contents: this MAP_FIXED page replaced
-     * the game's original mapping, so leaving a partially-written cave here can
-     * crash the game when the hook jumps into it. */
+    /* Roll back via ptrace (bypasses R-X protection on jailbroken PS5). */
     pt_copyin(pid, orig, page, span);
-    kernel_mprotect(pid, page, span, PROT_READ | PROT_WRITE | PROT_EXEC);
+    kernel_mprotect(pid, page, span, PROT_READ | PROT_EXEC);
     free(orig);
     return -1;
   }

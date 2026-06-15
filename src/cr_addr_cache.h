@@ -13,4 +13,6 @@ void addr_cache_save(void);
 int  addr_cache_get(const char *path, time_t mtime, int mod_idx, int entry_idx, addr_cache_entry_t *out);
 void addr_cache_set(const char *path, time_t mtime, int mod_idx, int entry_idx, intptr_t addr, const uint8_t *orig_bytes, size_t orig_len);
 void addr_cache_clear_for_path(const char *path);
+void addr_cache_clear_entry(const char *path, time_t mtime, int mod_idx, int entry_idx);
+void addr_cache_clear_for_title(const char *title_id);
 #endif

@@ -13,15 +13,6 @@ int parse_hex_bytes_checked(const char *s, uint8_t *out, size_t out_cap, size_t 
 
 int read_process_memory(pid_t pid, intptr_t addr, uint8_t *out, size_t len);
 
-/* Legacy wrapper: orig_prot_out = NULL. */
-int write_process_memory(pid_t pid, intptr_t addr, const uint8_t *data, size_t len);
-
-/* Extended: *orig_prot_out receives the page protection that was active before the write.
- * Caller can use (orig_prot & PROT_READ) to decide whether an external readback is meaningful.
- * On failure orig_prot_out is set to -1 (or left unchanged if protection query failed). */
-int write_process_memory_ex(pid_t pid, intptr_t addr, const uint8_t *data, size_t len,
-                             int *orig_prot_out);
-
 typedef enum {
     CR_ADDR_RESOLVE_OK_VERIFIED        =  0, /* expected was reliable and one candidate matched */
     CR_ADDR_RESOLVE_OK_UNVERIFIED_LEGACY    =  1, /* no reliable expected; legacy heuristic used */
@@ -72,7 +63,7 @@ int process_is_ps2_emu(pid_t pid);
 
 /* Code-cave write: allocates an anonymous page at the target address via pt_mmap MAP_FIXED,
  * preserves surrounding code, writes data, then mprotects RX.
- * Use only when write_process_memory returns -3 (verify mismatch) and codecave config is enabled. */
+ * Use when write_process_memory_forced fails and codecave config is enabled. */
 int write_via_codecave(pid_t pid, intptr_t addr, const uint8_t *data, size_t len);
 
 /* Forced write: skips kernel_get_vmem_protection, uses RWX→write→RX directly.

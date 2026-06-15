@@ -1769,9 +1769,9 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                  * instead of failing every apply, and is reached even when
                  * auto_detect=0 bypasses the resolve-time recovery path. */
                 cr_log("warn", "addr_cache",
-                       "entry[%d] stale cache baseline at 0x%lx — clearing and applying unverified title=%s mod=%d",
+                       "entry[%d] stale cache baseline at 0x%lx — clearing entry and applying unverified title=%s mod=%d",
                        pre_n, (long)addr, title_id, mod_index);
-                addr_cache_clear_for_path(path);
+                addr_cache_clear_entry(path, file_mtime, mod_index, pre_n);
                 entry_ace_hit[pre_n] = 2;  /* mark stale so this entry is not re-stored */
               } else {
                 rc = -1;

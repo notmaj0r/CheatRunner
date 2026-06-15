@@ -25,6 +25,7 @@
 #include "cr_titles.h"
 #include "cr_remote_sources.h"
 #include "cr_source_jobs.h"
+#include "http_client.h"
 
 pthread_mutex_t g_jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 cr_source_job_t g_jobs[CR_JOB_MAX];
@@ -34,7 +35,23 @@ int g_next_job_id = 1;
 static cJSON *remote_cheat_find_work(const char *title_id, const char *version,
                                       char *err, size_t err_size, int *http_status_out);
 static cJSON *remote_cheat_download_work(const char *body_json,
-                                          char *err, size_t err_size, int *http_status_out);
+                                          char *err, size_t err_size, int *http_status_out,
+                                          int job_id);
+
+/* Progress callback: updates dl_recv/dl_total on the job slot. */
+static void
+dl_progress_cb(size_t recv, size_t total, void *ud) {
+  int job_id = *(const int *)ud;
+  pthread_mutex_lock(&g_jobs_lock);
+  for (int i = 0; i < CR_JOB_MAX; i++) {
+    if (g_jobs[i].used && g_jobs[i].id == job_id) {
+      g_jobs[i].dl_recv  = recv;
+      g_jobs[i].dl_total = total;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_jobs_lock);
+}
 
 /* ---- Public API ---- */
 
@@ -169,11 +186,14 @@ cr_source_job_status_json(int job_id) {
   char error[128] = {0};
   char *result_txt = NULL;
   int found = 0;
+  size_t dl_recv = 0, dl_total = 0;
   for (int i = 0; i < CR_JOB_MAX; i++) {
     if (g_jobs[i].used && g_jobs[i].id == job_id) {
       found = 1;
       state = g_jobs[i].state;
       http_status = g_jobs[i].http_status;
+      dl_recv  = g_jobs[i].dl_recv;
+      dl_total = g_jobs[i].dl_total;
       if (state == CR_JOB_DONE && g_jobs[i].result)
         result_txt = cJSON_PrintUnformatted(g_jobs[i].result);
       else if (state == CR_JOB_FAILED)
@@ -196,6 +216,10 @@ cr_source_job_status_json(int job_id) {
 
   if (state == CR_JOB_PENDING || state == CR_JOB_RUNNING) {
     cJSON_AddStringToObject(out, "state", state == CR_JOB_PENDING ? "pending" : "running");
+    if (state == CR_JOB_RUNNING && dl_total > 0) {
+      cJSON_AddNumberToObject(out, "dlRecv",  (double)dl_recv);
+      cJSON_AddNumberToObject(out, "dlTotal", (double)dl_total);
+    }
     return out;
   }
 
@@ -279,7 +303,7 @@ source_job_thread(void *arg) {
       result = remote_cheat_find_work(title_id, version, err, sizeof(err), &http_status);
       break;
     case CR_JOB_CHEAT_DOWNLOAD:
-      result = remote_cheat_download_work(body_copy, err, sizeof(err), &http_status);
+      result = remote_cheat_download_work(body_copy, err, sizeof(err), &http_status, job_id);
       break;
     default:
       snprintf(err, sizeof(err), "unknown_job_type");
@@ -329,6 +353,7 @@ remote_cheat_find_work(const char *title_id, const char *version,
   source_model_load(&model);
   remote_candidate_t candidates[MAX_REMOTE_CANDIDATES];
   int cand_n = 0, attempted_sources = 0, network_failures = 0, rate_limited_failures = 0;
+  int any_stale = 0;
   for (int i = 0; i < model.cheat_count; i++) {
     remote_source_t *src = &model.cheat_sources[i];
     if (!src->enabled || strcasecmp(src->type, "github") != 0) continue;
@@ -343,6 +368,7 @@ remote_cheat_find_work(const char *title_id, const char *version,
       cr_log("warn", "cheats.remote", "source load failed source=%s reason=%s", src->name, lerr);
       continue;
     }
+    if (!strcmp(lerr, "stale_cache")) any_stale = 1;
     cJSON *it = NULL;
     cJSON_ArrayForEach(it, entries) {
       cJSON *path_j   = cJSON_GetObjectItem(it, "path");
@@ -414,13 +440,14 @@ remote_cheat_find_work(const char *title_id, const char *version,
     cJSON_AddNumberToObject(e, "size",        candidates[i].size);
     cJSON_AddItemToArray(arr, e);
   }
+  if (any_stale) cJSON_AddBoolToObject(out, "stale", 1);
   if (http_status_out) *http_status_out = 200;
   return out;
 }
 
 static cJSON *
 remote_cheat_download_work(const char *body_json,
-                            char *err, size_t err_size, int *http_status_out) {
+                            char *err, size_t err_size, int *http_status_out, int job_id) {
   int sources_enabled = 1, download_enabled = 1, max_bytes = 1048576;
   cfg_get_cheat_remote_opts(&sources_enabled, &download_enabled, NULL, &max_bytes);
   if (!sources_enabled || !download_enabled) {
@@ -515,7 +542,9 @@ remote_cheat_download_work(const char *body_json,
   int dl_status = -1;
   uint8_t *data = NULL;
   size_t len = 0;
-  int frc = http_fetch_bytes_checked(url, (size_t)max_bytes, &dl_status, &data, &len);
+  int frc = http_get_url_ex_timeout_progress("CheatRunner/0.1", url, (size_t)max_bytes, 0,
+                                              &dl_status, &data, &len,
+                                              dl_progress_cb, &job_id);
   if (frc == -2) {
     if (err) snprintf(err, err_size, "file_too_large");
     if (http_status_out) *http_status_out = 400;

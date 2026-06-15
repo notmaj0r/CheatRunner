@@ -62,6 +62,8 @@ int sceKernelGetAppInfo(pid_t pid, app_info_t *info);
 int sceUserServiceInitialize(void *params);
 void sceUserServiceTerminate(void);
 int sceUserServiceGetForegroundUser(uint32_t *user_id);
+int sceUserServiceGetUserName(int32_t user_id, char *name, size_t size);
+int sceUserServiceSetUserName(int32_t user_id, const char *name);
 int sceKernelSendNotificationRequest(int, notify_request_t *, size_t, int);
 
 #if CHEATRUNNER_HAVE_SCE_USER_LIST

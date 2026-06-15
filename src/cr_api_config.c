@@ -28,6 +28,7 @@ handle_api_config(int fd) {
            "\"cheat_min_stable_ms\":%d,\"cheat_apply_cooldown_ms\":%d,"
            "\"cheat_codecave_fallback\":%d,\"cheat_master_code_fixup\":%d,"
            "\"cheat_addr_cache_enabled\":%d,\"cheat_inter_mod_delay_ms\":%d,"
+           "\"fan_min_c\":%d,\"fan_max_c\":%d,"
            "\"allow_unsafe_mc4_apply\":%d,\"allow_unsafe_shn_apply\":%d,"
            "\"cheat_log_candidates\":%d,\"cheat_mark_crash_suspect\":%d,"
            "\"cheat_apply_one_at_a_time\":%d,"
@@ -48,6 +49,7 @@ handle_api_config(int fd) {
            g_cfg.cheat_min_stable_ms, g_cfg.cheat_apply_cooldown_ms,
            g_cfg.cheat_codecave_fallback, g_cfg.cheat_master_code_fixup,
            g_cfg.cheat_addr_cache_enabled, g_cfg.cheat_inter_mod_delay_ms,
+           g_cfg.fan_min_c, g_cfg.fan_max_c,
            g_cfg.allow_unsafe_mc4_apply, g_cfg.allow_unsafe_shn_apply,
            g_cfg.cheat_log_candidates, g_cfg.cheat_mark_crash_suspect,
            g_cfg.cheat_apply_one_at_a_time,
@@ -195,6 +197,12 @@ handle_api_config_set(int fd, const char *query) {
     g_cfg.cheat_log_candidates = atoi(value) ? 1 : 0;
   } else if (!strcmp(key, "cheat_apply_one_at_a_time")) {
     g_cfg.cheat_apply_one_at_a_time = atoi(value) ? 1 : 0;
+  } else if (!strcmp(key, "fan_min_c")) {
+    int v = atoi(value);
+    g_cfg.fan_min_c = (v >= 10 && v <= 60) ? v : 30;
+  } else if (!strcmp(key, "fan_max_c")) {
+    int v = atoi(value);
+    g_cfg.fan_max_c = (v >= 50 && v <= 100) ? v : 90;
   } else if (!strncmp(key, "hotkey_", 7)) {
     /* removed — silently ignore */
     (void)value;

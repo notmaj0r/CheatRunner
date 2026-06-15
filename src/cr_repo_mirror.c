@@ -18,7 +18,7 @@
 #define AGENT         "CheatRunner/0.1"
 #define TREE_LIST_MAX (16 * 1024 * 1024)
 #define DIR_LIST_MAX  (4 * 1024 * 1024)
-#define FILE_MAX      (2 * 1024 * 1024)
+#define FILE_MAX      (8 * 1024 * 1024)
 
 typedef struct {
   const char *id;
@@ -514,8 +514,12 @@ dl_worker_fn(void *arg) {
     if (rc != 0 || status != 200) {
       progress_inc_failed();
       progress_add_missing(e->basename);
-      cr_log("warn", "repo_mirror", "download failed source=%s file=%s rc=%d status=%d",
-             q->repo->id, e->basename, rc, status);
+      if (rc == -2)
+        cr_log("warn", "repo_mirror", "download skipped (file too large >%dMB) source=%s file=%s status=%d",
+               (int)(FILE_MAX / (1024 * 1024)), q->repo->id, e->basename, status);
+      else
+        cr_log("warn", "repo_mirror", "download failed source=%s file=%s rc=%d status=%d",
+               q->repo->id, e->basename, rc, status);
       free(fdata);
       continue;
     }
