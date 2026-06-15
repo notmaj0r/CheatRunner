@@ -1,5 +1,148 @@
 # CheatRunner — Changelog
 
+## v0.13
+
+_In development._
+
+### Write Engine — Execute-Only (XOM) Memory Reads
+
+- **`read_process_memory` now reads PS5 execute-only `.text` pages.** The kernel maps game code as `PROT_EXEC` with no `PROT_READ`, so a raw `pt_copyout` on a hook site faults — every baseline/state read of code came back unreadable, and cheats showed permanent **mismatch / partial** state even though the version matched. The reader now detects the read failure, temporarily adds `PROT_READ` via `kernel_mprotect`, re-reads, and restores the page's **original** protection (preserving W^X).
+- **Surgical and panic-safe by construction:**
+  - The fast path (`pt_copyout` succeeds) is unchanged — readable data/heap pages never touch page protection, zero overhead and zero new risk for the common case.
+  - The slow path runs only after a read already failed, and is gated by `ADDR_IN_USER_RANGE` *before* calling `kernel_get_vmem_protection` — the same guard the write path uses, because that kernel call can panic on a bad pointer.
+  - Bails out on `op < 0` (genuinely unmapped) and `op & PROT_READ` (already readable, so the read truly failed) without re-reading; restores the original protection on every exit path. `READ` is added without `WRITE`, so the page is never W+X.
+- Fixes hook-based cheats (e.g. GoldHEN JSON with `vmovss`/code-cave hooks) that resolved to the correct address but failed every pre-write baseline read. Mirrors the approach used by the sibling elf-arsenal project.
+
+### Daemon — Crash Log
+
+- **SIGSEGV and SIGBUS are now caught.** A `sigaction(SA_RESETHAND)` handler writes a one-line entry (`signal=NN CheatRunner crashed`) to `/data/cheatrunner/crash.log` (appended, never overwritten) using only async-signal-safe calls (`open`/`write`/`close`/`_exit`), then terminates. Previously the daemon died silently with no on-disk record; now the crash is visible on the next FTP session without needing klogsrv.
+- `CHEATRUNNER_CRASH_LOG_PATH` constant added to `cr_paths.h`.
+
+### HTTP Server — TCP_NODELAY on Accepted Sockets
+
+- `setsockopt(IPPROTO_TCP, TCP_NODELAY)` is now called on every accepted client fd immediately after `accept()`. Disables Nagle's algorithm so small JSON API responses are flushed without waiting to fill a segment — reduces per-request latency for the dashboard's continuous polling (fan temps, logs, game state) that each fire a tiny response.
+
+### Remote Downloads — Live Progress
+
+- **Download jobs now report byte-level progress.** The `sceHttpReadData` loop in `http_client.c` calls an optional `http_progress_fn_t` callback after each chunk; `received` and `total` (Content-Length, 0 if unknown) are passed through.
+- New public API: `http_get_url_ex_timeout_progress(…, pfn, pud)` in `http_client.h`; existing `http_get_url_ex_timeout` delegates to it with `NULL` callbacks — no change for other callers.
+- Download jobs (`CR_JOB_CHEAT_DOWNLOAD`) update `dl_recv` / `dl_total` on the job struct under `g_jobs_lock` on every chunk.
+- The job status endpoint (`/api/sources/jobs/status`) now includes `dlRecv` and `dlTotal` when `state == "running"` and the server sent a Content-Length.
+- **Dashboard**: the per-candidate Download button shows `Downloading… 42%` live while the job is running and resets to `Download` in a `finally` block. The progress callback in `pollSourceJob` now receives the full status object (not just the state string).
+
+### Write Engine — User-Range Guard
+
+- `write_process_memory_forced` now checks `ADDR_IN_USER_RANGE` at entry (the same macro already used for probe reads: `0x1000 ≤ addr ≤ 0x7FFFFFFFFFFF`). If the resolved cheat address is outside user space (GPU/MMIO, kernel text, null) the write is rejected with `write_rejected addr=0x… not_in_user_range` at error level and returns `-7` — preventing the `kernel_mprotect` / ptrace / codecave chain from touching memory regions where a ptrace read page-faults and freezes the game.
+
+### Thermals & Fan — Stale Cache Toast
+
+- When a remote cheat source fetch falls back to the on-disk index (network unavailable), the dashboard now shows an amber **"Results from cached index (network unavailable). Data may be outdated."** warning toast instead of the normal success message. Previously the user had no indication that the results were stale.
+- Implemented by tracking an `any_stale` flag in `remote_cheat_find_work` (set when `source_load_cheat_entries` returns with `lerr == "stale_cache"`) and including `"stale": true` in the job result JSON.
+
+### Thermals & Fan — Configurable Threshold Range
+
+- The fan-on threshold slider bounds (`30–90°C`) were compile-time `#define` constants. They are now runtime-configurable via two new config keys: `fan_min_c` (default 30, valid 10–60) and `fan_max_c` (default 90, valid 50–100).
+- All six validation sites in `cr_fan.c` read the range through a `fan_get_range()` helper that holds `g_cfg_lock` — no stale reads under concurrent config reload.
+- `/api/fan/temp` and `/api/fan` responses include `minC` and `maxC`; the dashboard slider updates its `min`/`max` attributes on each poll.
+- Config keys exposed via `GET/POST /api/config` alongside all other settings.
+
+### Thermals & Fan — °C / °F Toggle
+
+- A **°C / °F** toggle button (`fanUnitBtn`) was added to the Thermals & Fan action row.
+- All three temperature cells, the threshold label, the slider live-drag label, and the Apply success toast convert through `toDispTemp(c)` / `fanDegStr()` based on the active unit.
+- **Preference is persisted** to `localStorage('cr_fan_unit')` and restored on page load without a flash.
+- The slider's internal value and the API call (`/api/fan/set?temp=`) always stay in Celsius — only what the user reads is converted.
+- `/api/fan/temp` now also includes `thresholdF` (alongside the existing `thresholdC`) so the polling endpoint is self-consistent with the set endpoint.
+- **Active-unit indicator**: the toggle button now gains `.btn.active` (brand fill + white text) when Fahrenheit is selected, making the current unit visually distinct rather than appearing as a plain label. Celsius shows as the default ghost style. State is applied on page load from `localStorage` so there is no flash.
+
+### Dashboard — Collapsible Sidebar Panels & Panel Reorder
+
+- **Every sidebar panel can now be collapsed.** A chevron button in each panel header collapses or expands the panel body with a smooth CSS animation — `max-height` transition (0.3 s cubic-bezier) with a faster opacity fade (0.15 s) that visually hides content before the height animation begins, masking the inherent jank of `max-height` transitions. Clicking the header row or the button both toggle.
+- **State is persisted across sessions.** Collapse state for each panel is saved to `localStorage` (key `cr_panel_${id}`) and restored on next load without a visible flash — the transition is temporarily suppressed via `requestAnimationFrame` on first paint so the page does not animate collapsed panels on every load.
+- **Setup panel reordered.** The Setup panel now appears immediately below Live Status (was previously fourth). New sidebar order: Live Status → Setup → User Profile → Thermals & Fan → Logs.
+- All animations respect `prefers-reduced-motion`.
+
+### Dashboard — Font Upgrade (Space Grotesk / Inter / JetBrains Mono)
+
+- **Fonts now actually load.** The CSS had specified `Inter` (base) and `Outfit` (display) as first-choice fonts, but no `<link>` tag was present — the PS5 browser silently fell back to `system-ui`. Added Google Fonts `preconnect` hints and a single combined stylesheet request with `display=swap`.
+- **`--cr-font-display`** changed from `Outfit` → **Space Grotesk** — geometric, technical, and clean; used on game titles, panel headers, and modal titles.
+- **`--cr-font-base`** stays as **Inter** — was already specified but was never delivered to the browser; now loads correctly.
+- **`--cr-font-mono`** changed from `ui-monospace / Menlo / Consolas` → **JetBrains Mono** — purpose-built for technical content; hex addresses, log entries, and code-cave byte sequences now render with it.
+
+### Bug Fix — Memory Patch Status Always Showed "Not Ready"
+
+- **Fixed**: the Live Status and Setup panels always displayed **Memory Patch — Not Ready**, even on a fully jailbroken PS5 with `can_patch=1` logged at boot.
+- Root cause: the JS read `s.cheats.canPatchGameMemory` from the `/api/state` response, but the `cheats` object in that response never included `canPatchGameMemory` — the field only existed in the `privileges` sub-object of a different endpoint that `refreshGlobalState()` never fetches. The field was always `undefined` → `false`.
+- Fix: `canPatchGameMemory` is now included in the `cheats` object of both branches of the `/api/state` response (game running and idle), sourced directly from `cr_priv_can_patch_game_memory()`.
+
+### Write Engine — Dead Code Removal, Hardening & Heuristic Improvement
+
+- **Removed `write_process_memory` and `write_process_memory_ex` (dead code).** Every caller in `cr_cheats.c` and `cr_patch_parser.c` already uses `write_process_memory_forced`. The `_ex` path called `kernel_get_vmem_protection`, which panics on PS4 BC and PS5 special vmem entries — a loaded trap for any future caller who found the shorter-named function in the header. Both functions and the static `fmt_hex16` helper used only by `_ex` are removed from `cr_memory.c`; declarations removed from `cr_memory.h`.
+- **Removed duplicate `ROUND_PG_DOWN/UP` macro definitions** from the top of `cr_memory.c` — identical definitions already exist in `cr_memory.h`; the per-file copies were redundant.
+- **Clarified `write_process_memory_forced` R-X restore failure handling.** When `kernel_mprotect(PROT_READ|PROT_EXEC)` fails after a successful write, the function returns success and logs a warning — on PS4 BC pages the emulation layer manages page protections independently, so `mprotect(RX)` is rejected by the kernel but the hardware PTE still permits execution and the written bytes execute correctly. The warning log is preserved for diagnosis.
+- **x86 instruction heuristic upgraded from 1-byte to 2-byte validation.** The Tier-2 address probe previously checked only the first byte of each candidate, giving a ~30–40% false-positive rate — `0x48` ("H") is common in ASCII strings and pointer data, but was treated as a REX prefix indicating executable code. The probe now requires a valid opcode as the second byte for REX-prefixed instructions (`0x40–0x4F`), and validates byte pairs for `0x0F` escapes, operand-size prefix, and ModRM-bearing opcodes. Single-byte unambiguous instructions (PUSH/POP reg, NOP, RET) and control-flow instructions (CALL rel32, JMP rel32/rel8, Jcc rel8) continue to be recognized by first byte alone.
+
+### Thermals & Fan Control
+
+- **Live temperatures.** A new **Thermals & Fan** panel in the sidebar shows CPU, SoC, and M.2 NVMe temperatures (read via `sceKernelGetCpuTemperature` / `sceKernelGetSocSensorTemperature`). Each temperature number turns **yellow** past 65°C and **red** past 80°C. The bar below the grid shows overall hottest-sensor level as a width indicator (neutral color). Polls every 4s.
+- **Manual fan-on threshold.** A slider (30–90°C) + Apply sets the fan-on threshold through the `/dev/icc_fan` ioctl (`0xC01C8F07`). Lower threshold = fan spins up sooner = cooler/louder.
+- **Stays pinned.** A background watcher re-applies the chosen threshold every 15s, because the firmware resets fan state on every game/app launch. The value is persisted to `/data/cheatrunner/fan.json` and re-applied at boot, so it survives a payload redeploy.
+- **Graceful when unavailable.** `/dev/icc_fan` requires kstuff to be loaded; if it isn't, temperatures still display where possible and the control surfaces a clear "Needs kstuff" hint instead of failing silently.
+- New endpoints: `GET /api/fan/temp`, `GET/POST /api/fan/set?temp=<C>`, `GET /api/fan`.
+
+### User Profile — Rename & Change Picture
+
+- **New "User Profile" sidebar panel.** Shows the signed-in (foreground) user's name and ID.
+- **Rename.** Type a new name (≤16 chars) and hit Rename — applied directly via `sceUserServiceSetUserName` (no external payload, no reboot for the registry write).
+- **Change picture.** Choose any image (PNG/JPG/BMP, ≤4 MB); CheatRunner decodes it (`stb_image`), centre-crops to a square, and encodes the four **DXT5 `.dds`** sizes (64/128/260/440) the firmware expects. A live preview is shown, then **Apply** writes `avatar*/picture*.dds` + `online.json` into `/system_data/priv/cache/profile/0x<uid>/`. Re-open the user switcher (or reboot) to see it.
+- Bundles the public-domain `stb_image` / `stb_image_write` single-header libs (`src/third_party/`).
+- New endpoints: `GET /api/profile`, `POST /api/profile/name?name=`, `POST /api/profile/avatar` (body = image), `POST /api/profile/avatar/apply`, `GET /api/profile/avatar/preview?size=`.
+
+### Home-Screen Tile PKG — Auto-Install
+
+- **CheatRunner now installs its own home-screen tile on first boot.** On startup, a background thread (`cr-tile-inst`) checks whether the tile (`CHTR09999`) is already present at `/user/appmeta/CHTR09999`; if not, it waits 30s for the system to settle, writes the embedded PKG to `/data/cheatrunner/cheatrunner-tile.pkg`, and installs it via `sceAppInstUtilAppInstallPkg` (with an `sceAppInstUtilInstallByPackage` `file://` URI fallback). A PS5 notification confirms success or failure. On all subsequent boots the `stat` check short-circuits immediately — no re-install, no SceShellCore crash.
+- The tile PKG (`dist/CheatRunner.pkg`, titleId `CHTR09999`) is **embedded at build time** as a C byte array (`cheatrunner_tile_pkg.h`). If `dist/CheatRunner.pkg` is absent when cmake configures, `CHEATRUNNER_HAVE_TILE_PKG` is not defined and the thread exits immediately — every other feature still works.
+- New module: `src/cr_tile_pkg.c` / `cr_tile_pkg.h`. Linked against `libSceAppInstUtil`.
+- Build order: run `pkg-source/build-pkg.sh` → then `./build-cheatrunner.sh --clean`.
+
+### Networking — Port Reuse on Payload Redeploy
+
+- **`SO_REUSEPORT` added to the HTTP listener** (`cr_http.c`). `SO_REUSEADDR` (already present since v0.12) only reclaims dead `TIME_WAIT` sockets. When a prior CheatRunner is stuck in an uninterruptible `accept()` sleep after receiving `SIGKILL`, the port stays bound — `SO_REUSEADDR` cannot reclaim it. `SO_REUSEPORT` allows the new instance to bind immediately; the kernel distributes incoming connections between both sockets. The old instance releases its socket within milliseconds once it wakes from sleep — the overlap is harmless.
+- **Kill loop fast-breaks on `EPERM`** (`main.c`). If the old CheatRunner had already escalated itself (uid=0, elevated authid) and the kill loop runs before the new instance completes its own privilege escalation, `kill()` returns `EPERM`. The loop previously spun the full 60 iterations (~9 s) without killing anything, then `bind()` failed. The loop now breaks immediately on `EPERM` and logs *"cannot kill old instance (EPERM) — escalation may have failed"*, surfacing the root cause instead of flooding the retry log.
+
+### Bug Fix — kinfo_proc Structsize Off-by-One (`find_pid_by_name`)
+
+- **Fixed**: structsize guard in `find_pid_by_name` (`cr_game_monitor.c`) used `<= 467` to skip records too short to safely read `ki_comm` (kinfo_proc offset +447, 20 bytes, last byte at +466 — minimum valid structsize = 467). The `<=` form incorrectly skipped records of **exactly** 467 bytes — the minimum valid size — causing CheatRunner to miss its own process name on kernels that report the minimum-size record. Changed to strict `< 467`.
+
+### Bug Fix — kinfo_proc Structsize Off-by-One (`find_pid_for_app_id`)
+
+- **Fixed**: same off-by-one pattern in `find_pid_for_app_id` (`cr_game_monitor.c`). The guard used `<= 76` for `ki_pid` (offset +72, 4 bytes, last byte at +75 — minimum valid structsize = 76), incorrectly skipping records of exactly 76 bytes. Game pid lookup could silently miss the running game on kernels that return the minimum-size record. Changed to strict `< 76`.
+
+### Dashboard — Running Game Pinned to Top of List
+
+- **The active game always appears first in the games grid**, above favorites and alphabetical order. The sort comparator now promotes `running: true` entries before any other key. The live `running` flag is kept current by the existing status poller (`/api/running`), so the tile rises to the top the moment a game is detected — no page reload required.
+- Backend also moves the running title to index 0 in `build_games_json_array` so freshly-built cache responses already have the correct order.
+
+### Dashboard — Profile Picture Crop & Resize UI
+
+- **Crop modal before upload.** Selecting a new profile picture now opens an interactive crop overlay instead of uploading the raw image immediately. The overlay shows a square crop box with rule-of-thirds grid lines and corner bracket handles.
+- **Pan and zoom.** Drag to reposition the image inside the crop box; scroll wheel or pinch gesture to zoom; a **Zoom** slider below the canvas mirrors scroll/pinch and is usable with a D-pad. Minimum zoom is clamped so the image always fills the crop box — no empty borders.
+- **Crop & Upload.** Confirming exports the 1:1 square region via `canvas.toBlob()` and POSTs it to `/api/profile/avatar`. The server-side centre-crop is then a no-op because the canvas already delivers a square, but remains in place as a safety net.
+- 4 MB size guard and `picInput` reset still apply before the modal opens.
+
+### Dashboard — Game Playtime & Last Played on Tiles
+
+- **Each game tile now shows playtime or last-played information** below the title ID, with no additional API round-trips.
+- **Last played date** is read directly from `tbl_contentinfo.lastAccessTime` in `/system_data/priv/mms/app.db` — the same timestamp the PS5 system itself maintains. Displayed as a relative label ("Last played: 2 days ago", "Last played: 3h ago") using the unix timestamp returned in the `/api/games` response as `lastAccessTime`.
+- **CheatRunner-tracked playtime** (from `cr_activity.c`, accumulated while CheatRunner is running) is shown as "Xh Ym played" when available, taking priority over the last-played label.
+- **Display priority:** native `playTime` column (reserved for firmware that exposes it) → CheatRunner session tracker → `lastAccessTime` relative label → nothing.
+- Investigation of `/system_data/priv/mms/app.db` confirmed that Sony does not store cumulative playtime locally — it is tracked server-side via PSN. `lastAccessTime` is the best available local signal.
+- `game_entry_t` extended with `play_time_seconds` and `last_access_time` fields (`cr_titles.h`). Both are populated via secondary queries in `appdb_collect_games_sqlite` and forwarded as `playTime` / `lastAccessTime` in the `/api/games` JSON response.
+
+### Dashboard — Supporter Credits
+
+- **Added "Special thanks" section to the Support modal.** Supporter names display with a continuously cycling RGB gradient animation (`@keyframes cr-rgb-cycle`), each name phase-shifted by 1 s so they cycle through different colors simultaneously.
+
 ## v0.12
 
 ### Dashboard — Motion & Polish
@@ -553,6 +696,14 @@
 - README no longer claims auto-apply patches on launch
 - README documents all three scan directories and strict apply behavior
 - Unsupported line types documented explicitly
+
+### Dashboard — Cheats First Sort
+
+- New **Cheats First** option in the sort dropdown. Games that have at least one local cheat file available are sorted to the top of the grid, then sorted alphabetically within each group. Makes it easy to find cheat-supported titles in a large library.
+
+### Dashboard — Active Cheat Tile Glow
+
+- Game tiles with at least one cheat currently **ON** now show a pulsing green glow border (`crCheatGlow` animation, 2.4 s ease-in-out). Driven by `activeCheatsSet`, which is updated on every `/api/cheats/state` poll — the tile lights up the moment a cheat goes active and fades when the last cheat is turned off. Animation is suppressed under `prefers-reduced-motion`.
 
 ---
 

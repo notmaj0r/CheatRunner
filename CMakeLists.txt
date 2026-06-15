@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.10)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 project(CheatRunnerPayload C)
-set(CHEATRUNNER_VERSION "0.12")
+set(CHEATRUNNER_VERSION "0.13")
 
 # Embed CheatRunner.png as a C byte array (cheatrunner_png.h in build dir).
 # If the asset is missing, generate a tiny fallback icon so builds still work.
@@ -26,11 +26,34 @@ else()
   )
 endif()
 
+# Embed dist/CheatRunner.pkg as a C byte array (cheatrunner_tile_pkg.h).
+# Build the PKG first with: cd pkg-source && ./build-pkg.sh
+# If absent the auto-install feature is compiled out but everything else works.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dist/CheatRunner.pkg")
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/dist/CheatRunner.pkg" _PKG_HEX HEX)
+  string(LENGTH "${_PKG_HEX}" _PKG_HEX_LEN)
+  math(EXPR _PKG_LEN "${_PKG_HEX_LEN} / 2")
+  string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _PKG_BYTES "${_PKG_HEX}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/cheatrunner_tile_pkg.h"
+    "static const unsigned char g_cheatrunner_tile_pkg[] = {${_PKG_BYTES}};\n"
+    "static const size_t g_cheatrunner_tile_pkg_len = ${_PKG_LEN}u;\n"
+  )
+  set(_HAVE_TILE_PKG ON)
+  message(STATUS "CheatRunner tile PKG: embedding ${_PKG_LEN} bytes from dist/CheatRunner.pkg")
+else()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/cheatrunner_tile_pkg.h"
+    "/* dist/CheatRunner.pkg not present at configure time — auto-install disabled */\n"
+  )
+  set(_HAVE_TILE_PKG OFF)
+  message(STATUS "CheatRunner tile PKG: dist/CheatRunner.pkg not found — auto-install disabled (run pkg-source/build-pkg.sh first)")
+endif()
+
 file(GLOB CHEATRUNNER_SRC CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c")
 
 add_executable(CheatRunner
   ${CHEATRUNNER_SRC}
   src/third_party/cJSON.c
+  src/third_party/stb_impl.c
   src/third_party/mc4/aes.c
   src/third_party/mc4/base64.c
   src/third_party/mc4/mc4decrypter.c
@@ -51,6 +74,7 @@ set(CHEATRUNNER_LIBS
   kernel_sys
   SceSystemService
   SceUserService
+  SceAppInstUtil
   SceHttp
   SceSsl
   SceNet
@@ -64,6 +88,9 @@ target_compile_definitions(CheatRunner PRIVATE
   CHEATRUNNER_HAVE_SCE_LNCUTIL=1
   CHEATRUNNER_HAVE_SCE_USER_LIST=1
 )
+if(_HAVE_TILE_PKG)
+  target_compile_definitions(CheatRunner PRIVATE CHEATRUNNER_HAVE_TILE_PKG=1)
+endif()
 message(STATUS "Using sceLncUtil* symbols from SceSystemService")
 message(STATUS "sceUserServiceGetLoginUserIdList: enabled")
 

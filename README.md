@@ -83,6 +83,8 @@ Runtime cheat memory writes can crash the game, break a session, corrupt your sa
 
 ## 🚀 Running
 
+### Payload loader (direct ELF)
+
 Send `CheatRunner.elf` to your already-jailbroken PS5 using your preferred payload loader.
 
 Then open the dashboard in your browser:
@@ -96,6 +98,29 @@ Example:
 ```text
 http://192.168.1.100:9999
 ```
+
+### Homebrew Launcher
+
+CheatRunner ships as a Homebrew Launcher-compatible package (`CheatRunner.zip`).
+
+1. Transfer `CheatRunner.zip` to your PC.
+2. Extract the zip **directly into `/data/homebrew/`** on your PS5 via FTP.
+   The result must be:
+
+   ```text
+   /data/homebrew/CheatRunner/
+   ├── CheatRunner.elf
+   ├── homebrew.js
+   └── sce_sys/
+       └── icon0.png
+   ```
+
+3. Open the Homebrew Launcher on your PS5. **CheatRunner** will appear as an app.
+4. Launch it, then open the dashboard in your browser:
+
+   ```text
+   http://<PS5-IP>:9999
+   ```
 
 ---
 
