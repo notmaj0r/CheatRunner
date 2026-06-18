@@ -21,8 +21,8 @@ CheatRunner is focused on local/offline homebrew usage on an already-jailbroken 
 
 CheatRunner is free and open-source. If you find it useful, feel free to support the project.
 
-[![Support me on Ko-fi](https://storage.ko-fi.com/cdn/kofi3.png?v=3)](https://ko-fi.com/maj0r)
-[![Buy me a coffee](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png)](https://buymeacoffee.com/maj0r)
+<a href="https://ko-fi.com/maj0r"><img src="https://storage.ko-fi.com/cdn/kofi3.png?v=3" alt="Support me on Ko-fi" height="36"></a>
+<a href="https://buymeacoffee.com/maj0r"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="36"></a>
 
 [![Join our Discord Server](https://img.shields.io/badge/Discord-Join%20our%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/E4g6fEqp46)
 
