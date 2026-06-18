@@ -32,16 +32,8 @@ along with this program; see the file COPYING. If not, see
 #include "pt.h"
 
 
-/* sys_ptrace temporarily elevates THIS process's ucred (authid + caps) for the
- * duration of one ptrace syscall, then restores it.  Those fields are
- * process-wide, so two threads doing this concurrently corrupt each other:
- * thread B can save thread A's already-elevated caps as its "baseline" and then
- * restore the process to a permanently-privileged state, while thread A's
- * mid-flight restore drops privileges out from under B's syscall (intermittent
- * EPERM ptrace failures).  CheatRunner calls ptrace from the apply thread, the
- * game-monitor thread (patch restore), and HTTP handler threads, so this must be
- * serialized.  A single static mutex around the save/elevate/syscall/restore is
- * sufficient and cheap — ptrace operations are not on any hot path. */
+/* sys_ptrace elevates this process's ucred process-wide for one syscall, so
+ * concurrent callers stomp each other's privileges — serialize with a mutex. */
 static pthread_mutex_t g_ptrace_ucred_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Per-thread batch-elevation state (see pt_batch_begin). When depth>0 this thread
@@ -141,6 +133,18 @@ pt_batch_end(void) {
   pid_t mypid = getpid();
   kernel_set_ucred_authid(mypid, g_pt_batch_authid);
   kernel_set_ucred_caps(mypid, g_pt_batch_caps);
+  pthread_mutex_unlock(&g_ptrace_ucred_lock);
+}
+
+
+void
+pt_ucred_lock(void) {
+  pthread_mutex_lock(&g_ptrace_ucred_lock);
+}
+
+
+void
+pt_ucred_unlock(void) {
   pthread_mutex_unlock(&g_ptrace_ucred_lock);
 }
 

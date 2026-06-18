@@ -227,14 +227,7 @@ launch_title(uint64_t gen, const char *title_id, const char *args, const char **
     *fguser_out = has_ctx;
   }
 
-  /*
-   * The launch worker is responsible for closing/waiting on the current BigApp.
-   * Do not kill the current app again here; doing so can race the actual launch.
-   *
-   * sceSystemServiceLaunchApp frequently returns 0x80940005 for mounted, fake-installed,
-   * or otherwise non-standard titles. Try the lower-level LncUtil path first, then keep
-   * SystemService as a compatibility fallback for titles that prefer it.
-   */
+  /* Don't kill the current app here (launch worker already handles it, would race); try LncUtil first since SystemService often 0x80940005s on non-standard titles. */
   lnc_rc = launch_title_with_lncutil(title_id, &ctx, has_ctx, argc > 0 ? argv_ptrs : NULL);
   if (rc_out) {
     *rc_out = lnc_rc;
@@ -559,9 +552,7 @@ launch_worker_thread(void *arg) {
   uint64_t my_gen = req.generation;
   set_launch_status_ex_gen(my_gen, 1, "killing_current", req.title_id, "Closing current game...", 0, "", 0, 0);
   cr_log("info", "launch", "request title=%s args=\"%s\"", req.title_id, req.args[0] ? req.args : "");
-  /* Preflight: if the monitor cache says the game is running, do a live system
-   * check before short-circuiting. The cache can be up to 500 ms stale after a
-   * manual close, causing CheatRunner to wrongly block a relaunch. */
+  /* Verify with a live check before trusting the cache, which can be up to 500ms stale after a manual close. */
   {
     running_game_state_t cur;
     running_state_get(&cur);

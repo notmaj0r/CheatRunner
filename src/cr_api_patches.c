@@ -15,10 +15,7 @@
 /* Maximum XML source files to scan per title */
 #define PATCHES_MAX_SOURCES 12
 
-/* Maximum entries across all source files for one title.
- * Fixed cap so that the heap allocation stays bounded even with the
- * larger PATCH_MAX_LINES (640).  128 covers 64 entries × 2 source files
- * which is more than any game in the current patch repo. */
+/* Maximum entries across all source files for one title; 128 covers 64 entries x 2 sources, more than any current game. */
 #define PATCHES_ALL_MAX 128
 
 static const char *
@@ -49,11 +46,7 @@ typedef struct {
     char           game_title[128];
 } merged_patches_t;
 
-/* Returns a heap-allocated merged_patches_t that the caller must free.
- * Fills entries in source-priority order.
- * Prefers files whose basename starts with title_id (e.g. CUSA13529.xml) over
- * cross-compatibility files (e.g. CUSA13893.xml that also lists CUSA13529).
- * Falls back to all files only when no named-match file is found. */
+/* Caller must free the result; prefers files named after title_id over cross-compat files that merely list it. */
 static merged_patches_t *
 build_merged_patches(const char *title_id) {
     char paths[PATCHES_MAX_SOURCES][384];
@@ -65,9 +58,7 @@ build_merged_patches(const char *title_id) {
 
     if (nsrc == 0) return m;
 
-    /* Determine which source files to use.  Prefer files whose basename starts
-     * with title_id so that CUSA13529.xml wins over CUSA13893.xml when both
-     * list CUSA13529.  Only fall back to all files if no named match exists. */
+    /* Prefer basenames starting with title_id; fall back to all files only if none match. */
     int use[PATCHES_MAX_SOURCES];
     int nuse = 0;
     size_t tid_len = strlen(title_id);
@@ -120,7 +111,7 @@ handle_patches_list(int fd, const char *query) {
     }
 
     merged_patches_t *m = build_merged_patches(title_id);
-    if (!m) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+    if (!m) { http_send_oom(fd); return; }
 
     /* Detect running game version */
     char game_ver[32] = {0};
@@ -270,7 +261,7 @@ handle_patches_apply(int fd, const char *query) {
                  strcmp(force_str, "1") == 0);
 
     merged_patches_t *m = build_merged_patches(title_id);
-    if (!m) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+    if (!m) { http_send_oom(fd); return; }
     if (m->count == 0) {
         free_merged(m);
         http_send_json(fd, 404, "{\"ok\":false,\"error\":\"patch_not_found\"}");
@@ -477,7 +468,7 @@ handle_patches_restore(int fd, const char *query) {
 static void
 handle_patches_files_list(int fd) {
     char *json = patch_files_list_json();
-    if (!json) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+    if (!json) { http_send_oom(fd); return; }
     http_send_json(fd, 200, json);
     free(json);
 }

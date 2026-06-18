@@ -85,15 +85,10 @@ typedef struct {
  * Condition: type==MASK && match_offset>=0 && match_offset+value_len < pattern_len */
 int cr_patch_line_has_trailing_pattern_bytes(const patch_line_t *ln);
 
-/* Compute a stable 8-hex-char entryId from source metadata; writes into entry->entry_id.
- * Must be called after source_path, source_kind, metadata_index, name, app_ver, line_count
- * are all populated. */
+/* Computes a stable 8-hex-char entryId from source metadata; call after those fields are populated. */
 void cr_patch_compute_entry_id(patch_entry_t *entry);
 
-/* Find all XML files for a given title ID across all patch directories.
- * Fills out_paths[][384] and out_kinds[] with up to max results in deterministic order:
- *   1. xml_prospero, 2. xml, 3. external — alphabetical within each dir.
- * Returns count found (0 = none). */
+/* Finds all XML files for a title ID; order is xml_prospero, xml, external, alphabetical within each. */
 int patch_find_xmls_for_title(const char *title_id,
                               char out_paths[][384], cr_patch_source_kind_t out_kinds[],
                               int max);
@@ -101,15 +96,11 @@ int patch_find_xmls_for_title(const char *title_id,
 /* Compatibility shim: returns first matching XML path only. */
 int patch_find_xml_for_title(const char *title_id, char *out_path, size_t out_sz);
 
-/* Parse the XML at xml_path for entries referencing title_id.
- * source_kind and source_path are stamped onto every returned entry.
- * Returns number of entries found, -1 on hard error (file missing, parse failure). */
+/* Parses xml_path for entries referencing title_id; returns count found, -1 on hard error. */
 int patch_parse_xml_file(const char *xml_path, const char *title_id,
                          cr_patch_source_kind_t source_kind, patch_doc_t *doc);
 
-/* Apply all lines in one patch entry with backup/rollback (all-or-nothing).
- * Returns 0 on full success, non-zero on failure.
- * result may be NULL if the caller does not need structured output. */
+/* Applies all lines in one entry with backup/rollback (all-or-nothing); result may be NULL. */
 int patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
                          patch_apply_result_t *result);
 
@@ -120,11 +111,7 @@ int  patch_is_applied(const char *title_id, const char *entry_id, pid_t pid);
 void patch_clear_for_pid(pid_t pid);    /* called by game monitor on game exit */
 void patch_clear_all_applied(void);     /* called on rescan */
 
-/* Backup store — original bytes captured at apply time, used to restore.
- * patch_restore_entry: restores one entry's bytes to the live process.
- * patch_restore_all_for_pid: called by game monitor on game stop; attempts
- *   restore if process still alive, then clears all backup records for pid.
- * patch_clear_backups_for_pid: unconditional state-only clear. */
+/* Backup store of original bytes captured at apply time, used to restore on game stop. */
 int  patch_restore_entry(const char *title_id, const char *entry_id, pid_t pid,
                          patch_apply_result_t *result);
 void patch_restore_all_for_pid(pid_t pid, const char *title_id);
@@ -138,9 +125,7 @@ void patch_index_invalidate(void);
 int  patch_global_enabled(void);
 void patch_global_set(int on);
 
-/* XML patch file management — list/toggle/delete patch XML files.
- * dir_idx: 0=xml_prospero, 1=xml, 2=external.
- * Toggle renames .xml <-> .xml.off; the scanner already ignores .xml.off files. */
+/* List/toggle/delete patch XML files; dir_idx: 0=xml_prospero, 1=xml, 2=external. Toggle renames .xml <-> .xml.off. */
 char *patch_files_list_json(void);
 int   patch_file_toggle(const char *name, int on, int dir_idx);
 int   patch_file_delete(const char *name, int dir_idx);

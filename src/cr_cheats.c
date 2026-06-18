@@ -167,11 +167,7 @@ find_cheat_file_for_title_dir(const char *dir, int depth, cheat_file_search_t *c
   closedir(d);
 }
 
-/*
- * Parse /data/cheatrunner/cheats/<fmt_name>.txt for locally saved filenames.
- * Each line may be a bare filename, a relative path, or a full path.
- * URL lines (http/https) are skipped.
- */
+/* Parse <fmt_name>.txt for saved filenames (bare/relative/full path; URLs skipped). */
 static void
 scan_local_txt_index(const char *fmt_name, int kind, cheat_file_search_t *ctx) {
   char idx_path[256];
@@ -349,12 +345,8 @@ apply_selection_rules(cheat_file_search_t *ctx) {
       ctx->selection_kind = CHEAT_SEL_GENERIC;
       return;
     }
-    /* 1c. No exact, no generic — fall back to best wrong-version candidate.
-     * This is a last-resort: if the only local files are wrong-version, loading
-     * them (with the visible mismatch warning) is better than showing "no cheat
-     * file found" and hiding the candidate selector entirely.  The UI marks
-     * these with WRONG VER and the version-mismatch banner; the user can
-     * explicitly force or switch to a different file. */
+    /* 1c. No exact/generic match — fall back to a wrong-version candidate
+     * (with a visible mismatch warning) rather than showing nothing. */
     char wp[256]; int wk = 99, ws = -1;
     if (best_by_match(ctx, CAND_MATCH_WRONG_VERSION, wp, sizeof(wp), &wk, &ws)) {
       snprintf(ctx->best_path, sizeof(ctx->best_path), "%s", wp);
@@ -836,12 +828,8 @@ crash_suspects_load(void) {
     cr_log("info", "cheats.guard", "loaded %d crash suspect(s) from disk", loaded);
 }
 
-/* Returns the mastercode mod that governs target_mod_idx: the nearest preceding mod
- * whose name contains "mastercode" / "master code" (case-insensitive).
- * For files with a single mastercode group the result is identical to the old
- * first-match search.  For multi-group files (e.g. mod[0]="HP Mastercode" and
- * mod[5]="Speed Mastercode") each group's dependent mods automatically pick up
- * their own mastercode rather than always auto-enabling group 0's. */
+/* Nearest preceding mod whose name contains "mastercode" — governs target_mod_idx
+ * (supports multiple mastercode groups in one file). */
 static cJSON *
 find_master_code_mod_for(cJSON *mods, int target_mod_idx) {
   cJSON *m = NULL;
@@ -875,11 +863,8 @@ fixup_mc_dependent_addr(uint64_t mc_base_off, uint64_t dep_off) {
   return (mc_base_off & ~(uint64_t)0xff) | (dep_off & 0xff);
 }
 
-/* Read the live MC region from process memory and scan for dep_off bytes.
- * If found at offset i within the MC payload, *addr_out = mc_addr + i.
- * Falls back to the low-byte combination when no match is found.
- * Returns 0 on read failure (leaves addr_out unchanged so the caller keeps
- * the normally-resolved address) or on hard allocation failure. */
+/* Scan the live MC region for dep_off bytes; falls back to the low-byte
+ * combination if not found. Returns 0 on read failure (addr_out unchanged). */
 static int
 mc_scan_dep_addr(pid_t pid, intptr_t mc_addr,
                  const uint8_t *mc_on, size_t mc_on_len,
@@ -960,13 +945,11 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
   char running_name[256] = {0};
   char run_norm[10] = {0};
   char cheat_norm[10] = {0};
-  int attached = 0;
   int rc = -1;
   applied_patch_t applied[64];  /* pre-read: addr, old_bytes, len */
   int pre_n = 0;                /* entries pre-read */
   uint8_t  wi_data[64][128];    /* bytes to write per entry */
   int      wi_is_cave[64];      /* 1 if len >= 16 (code cave) */
-  int      wi_is_absolute[64];  /* 1 if entry used absolute addressing */
   int      written_order[64];   /* pre_n indices in actual write order (for rollback) */
   int      write_ok_n = 0;      /* entries successfully written */
 
@@ -992,7 +975,6 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
   int cooldown_ms       = g_cfg.cheat_apply_cooldown_ms;
   int min_stable_ms     = g_cfg.cheat_min_stable_ms;
   int mc_fixup          = g_cfg.cheat_master_code_fixup;
-  int codecave_fb       = g_cfg.cheat_codecave_fallback;
   int log_candidates    = g_cfg.cheat_log_candidates;
   int addr_cache_enabled = g_cfg.cheat_addr_cache_enabled;
   int inter_mod_delay_ms = g_cfg.cheat_inter_mod_delay_ms;
@@ -1052,10 +1034,8 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
     }
   }
 
-  /* Base-address guard for relative-mode MC4/SHN: if the eboot base is still 0x0
-   * the game module hasn't mapped yet. Relative addresses (base+offset) would equal
-   * the raw offset — same as absolute — producing wrong writes AND poisoning the
-   * addr_cache with incorrect addresses and zero orig_bytes for all future applies. */
+  /* base==0 means the module hasn't mapped yet — relative addrs would equal
+   * the raw offset and poison the addr_cache with wrong addresses. */
   if (base == 0 && kind != 1) {
     snprintf(err, err_size, "base_not_ready");
     cr_log("warn", "cheats.guard",
@@ -1238,47 +1218,35 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
     }
   }
 
-  /* Mark apply in progress — suppresses scanner refresh during ptrace (Task 2) */
+  /* Mark apply in progress — suppresses scanner refresh during the write loop (Task 2) */
   g_cheat_applying = 1;
   cr_log("info", "cheats.guard",
          "pausing scanners during apply title=%s mod=%d pid=%d appId=0x%x",
          title_id, mod_index, (int)pid, app_id_live);
 
-  {
-    int _at = pt_attach_timed(pid, 2000);
-    if (_at < 0) {
-      g_cheat_applying = 0;
-      pthread_mutex_unlock(&g_cheat_apply_lock);
-      cJSON_Delete(root);
-      if (_at == -2) {
-        snprintf(err, err_size, "pt_attach timed out — game process unresponsive");
-        cr_log("warn", "cheats.guard", "pt_attach timeout pid=%d title=%s — forcing monitor re-poll",
-               (int)pid, title_id);
-        /* Force the game monitor to re-evaluate state immediately: if the process
-         * is truly dead, kill(pid,0) will fail and the next monitor tick will clear it. */
-        rpc_refresh_title_and_notify();
-      } else {
-        pid_t live_pid = (app_id_live > 0) ? find_pid_for_app_id((uint32_t)app_id_live) : -1;
-        if (live_pid <= 0) {
-          snprintf(err, err_size, "game has exited");
-          rpc_refresh_title_and_notify();
-        } else if (live_pid != pid) {
-          snprintf(err, err_size, "game restarted (pid changed)");
-          rpc_refresh_title_and_notify();
-        } else {
-          snprintf(err, err_size, "pt_attach failed (%d)", errno);
-        }
-      }
-      return -1;
+  /* write_process_memory_forced/read_process_memory are mdbg-backed and need no
+   * ptrace attach, so just confirm the process is still alive before writing. */
+  if (kill(pid, 0) != 0 && errno == ESRCH) {
+    g_cheat_applying = 0;
+    pthread_mutex_unlock(&g_cheat_apply_lock);
+    cJSON_Delete(root);
+    pid_t live_pid = (app_id_live > 0) ? find_pid_for_app_id((uint32_t)app_id_live) : -1;
+    if (live_pid <= 0) {
+      snprintf(err, err_size, "game has exited");
+      rpc_refresh_title_and_notify();
+    } else if (live_pid != pid) {
+      snprintf(err, err_size, "game restarted (pid changed)");
+      rpc_refresh_title_and_notify();
+    } else {
+      snprintf(err, err_size, "game process unresponsive");
     }
+    return -1;
   }
-  attached = 1;
 
   /* Resolve per-mod base (may differ from eboot base if module_name is set) */
   intptr_t mod_base = base;
   if (module_name[0]) {
     if (resolve_module_base(pid, module_name, base, &mod_base) != 0) {
-      pt_detach(pid, 0);
       g_cheat_applying = 0;
       pthread_mutex_unlock(&g_cheat_apply_lock);
       cJSON_Delete(root);
@@ -1429,22 +1397,13 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
           else if (!strcmp(title_addr_mode_pref, "relative")) { af = 0; inj = 0; adet = 0; }
         }
 
-        wi_is_absolute[pre_n] = af;
         /* MC fixup: save original offset for scan fallback, then apply low-byte adjustment */
         uint64_t off_u_dep_raw = off_u;
         if (do_mc_fixup && mc_base_off != 0) {
           off_u = fixup_mc_dependent_addr(mc_base_off, off_u);
         }
-        /* Build the expected-bytes hint for address resolution probing.
-         *
-         * For JSON: off_bytes == original game code by contract → fully reliable.
-         * For MC4/SHN with an explicit <expected> field: exp_bytes → reliable.
-         * For MC4/SHN without explicit expected: pass off_bytes as a non-reliable
-         *   hint (expected_reliable stays 0).  cheat_resolve_write_addr_ex will
-         *   try an off_bytes byte-exact probe before falling back to x86_probe.
-         *   This catches the common case where ValueOff = original game code
-         *   and eliminates x86_probe false-positives that land hooks in the
-         *   wrong function. */
+        /* Expected-bytes hint: JSON/explicit-expected are reliable; MC4/SHN
+         * without one is a soft hint only (expected_reliable stays 0). */
         const uint8_t *expect_cmp = NULL;
         if (exp_len > 0) {
           expect_cmp        = exp_bytes;
@@ -1453,9 +1412,7 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
           expect_cmp        = off_bytes;
           expected_reliable = 1;
         } else if (kind != 1 && off_len > 0 && off_len == on_len) {
-          /* MC4/SHN: pass off_bytes as a soft probe hint.
-           * expected_reliable stays 0 so a mismatch falls through to
-           * x86_probe / fallback policy rather than blocking the apply. */
+          /* Soft probe hint — a mismatch falls through to x86_probe/fallback. */
           expect_cmp = off_bytes;
         }
         /* Fallback policy for MC4/SHN without a reliable expected baseline. */
@@ -1465,31 +1422,23 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
           if (strcmp(fb_str, "legacy") == 0)         fallback_pol = CR_ADDR_FALLBACK_LEGACY;
           else if (strcmp(fb_str, "absolute") == 0)  fallback_pol = CR_ADDR_FALLBACK_ABSOLUTE;
           else if (strcmp(fb_str, "relative") == 0)  fallback_pol = CR_ADDR_FALLBACK_RELATIVE;
-          /* Disable probe: reading both address candidates blindly can hang the game
-           * if the raw MC4/SHN offset maps to PS5 GPU/MMIO memory — the page-fault
-           * under ptrace never returns. Use the configured fallback policy directly.
-           * (Mirrors the identical guard in the dashboard state-read path.) */
+          /* Disable probe — blindly reading both candidates can hang the game
+           * if the raw offset maps to PS5 GPU/MMIO. */
           adet = 0;
         }
         addr = cheat_resolve_write_addr_ex(pid, entry_base, off_u, af, inj, adet,
                                            on_bytes, on_len, expect_cmp, expected_reliable,
                                            fallback_pol, &resolve_st, 0 /*silent=false*/);
         if (resolve_st == CR_ADDR_RESOLVE_UNRESOLVED) {
-          /* If expected bytes came from the addr_cache, the entry may be stale
-           * (game binary updated, or cache populated with wrong bytes).
-           * Recovery: try the cached address directly, then clear and retry
-           * without a baseline using the configured fallback policy. */
+          /* addr_cache entry may be stale — try it directly before retrying without a baseline. */
           if (entry_ace_hit[pre_n]) {
             intptr_t caddr = entry_ace_addr[pre_n];
             int recovered = 0;
             if (caddr > 0) {
               uint8_t cprobe[128];
               int cprobe_ok = (read_process_memory(pid, caddr, cprobe, on_len) == 0);
-              /* Accept the cached address when it holds either:
-               *   (a) the original bytes stored at first-enable time, OR
-               *   (b) the ValueOff bytes — cheat was disabled but address is
-               *       still correct; this is the common case after a disable cycle
-               *       where off_bytes (not orig bytes) were written back. */
+              /* Accept the cached address if it holds the original bytes or ValueOff
+               * (disabled-but-correct-address case). */
               int match_orig = cprobe_ok && memcmp(cprobe, exp_bytes, on_len) == 0;
               int match_off  = cprobe_ok && effective_on && off_len == on_len &&
                                memcmp(cprobe, off_bytes, off_len) == 0;
@@ -1498,11 +1447,8 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                 resolve_st = CR_ADDR_RESOLVE_OK_VERIFIED;
                 recovered = 1;
                 if (match_off) {
-                  /* ValueOff confirms the address is right, but the stored orig_bytes
-                   * are stale (e.g. zeros from a prior apply when base was 0x0).
-                   * Clear expected_reliable so the validation block below actually
-                   * enters unverified mode instead of comparing cur_bytes against
-                   * those stale orig_bytes and failing with "mismatch before ON". */
+                  /* orig_bytes are stale here — drop expected_reliable so validation
+                   * doesn't compare against them and falsely fail. */
                   expected_reliable = 0;
                   exp_len = 0;
                 }
@@ -1546,10 +1492,7 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                          kind == 2 ? "shn" : "mc4");
                 break;
               }
-              /* Stale cache was discarded and the retry used no baseline.
-               * Reset expected_reliable so the validation block treats this
-               * entry as unverified — prevents spurious "mismatch before OFF"
-               * on disable when the addr_cache orig_bytes came from ON state. */
+              /* Cache discarded, retried with no baseline — mark unverified. */
               expected_reliable = 0;
               exp_len = 0;
             }
@@ -1608,15 +1551,9 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                              resolve_st == CR_ADDR_RESOLVE_OK_UNVERIFIED_RELATIVE   ||
                              resolve_st == CR_ADDR_RESOLVE_OK_X86_PROBE             ||
                              resolve_st == CR_ADDR_RESOLVE_OK_OFFBYTES_PROBE);
-        /* Also fire for explicit relative/absolute address modes: those resolve as
-         * OK_VERIFIED (no probe), but an MC4/SHN entry with no <expected> bytes is
-         * still unverified and is exactly the case we need to diagnose. */
+        /* Also fires for explicit relative/absolute modes with no <expected> bytes. */
         if ((is_legacy_unv || !expected_reliable) && kind != 1) {
-          /* Full byte dump (cur = what's there now, write = what we put down) so a
-           * frozen cheat can be diagnosed: for a hook entry the write bytes reveal
-           * the JMP target; for a cave entry the cur bytes reveal whether the cave
-           * address is real free space (zeros / 0xCC / NOP padding) or live game
-           * code/data we'd be corrupting. */
+          /* Dump cur/write bytes so a frozen cheat can be diagnosed from the logs. */
           char cur_hex[268] = {0};
           char new_hex[268] = {0};
           bytes_to_hex(cur_bytes, wlen, cur_hex, sizeof(cur_hex));
@@ -1625,10 +1562,8 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                  "pre_write_bytes addr=0x%lx len=%zu format=%s type=%s cur=%s write=%s title=%s mod=%d entry=%d",
                  (long)addr, wlen, kind == 2 ? "shn" : "mc4",
                  (wlen >= 16 ? "cave" : "hook"), cur_hex, new_hex, title_id, mod_index, pre_n);
-          /* Null-byte hint: warn when target looks like uninitialized/data memory.
-           * Suppressed when offbytes_probe confirmed the address — in that case
-           * the null bytes ARE the expected ValueOff state of a pre-zeroed cave
-           * (MC4 caves live in BSS-adjacent space and are zero until written). */
+          /* Warn on a null-byte target, unless offbytes_probe already confirmed
+           * it's a legitimately pre-zeroed cave. */
           if (wlen >= 4 && resolve_st != CR_ADDR_RESOLVE_OK_OFFBYTES_PROBE) {
             int zero_cnt = 0;
             for (size_t _hz = 0; _hz < 4 && _hz < wlen; _hz++)
@@ -1639,14 +1574,11 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                      "likely not executable code; check cheat_%s_unverified_fallback config "
                      "title=%s mod=%d",
                      (long)addr, kind == 2 ? "shn" : "mc4", title_id, mod_index);
-              /* Cave writes (len>=16) to null memory mean shellcode would land in
-               * BSS/data — the hook JMP will crash the game. Block it unless
-               * allow_legacy / allow_unsafe is set, in which case the user has
-               * already accepted unverified writes and we warn-and-proceed. */
+              /* Cave write to null memory has frozen the console before — gated on
+               * allow_unsafe only, never allow_legacy (that one defaults on). */
               if (wlen >= 16) {
-                int _al_noex   = (kind == 2) ? allow_legacy_shn : allow_legacy_mc4;
                 int _al_unsafe = (kind == 2) ? allow_unsafe_shn : allow_unsafe_mc4;
-                if (!_al_noex && !_al_unsafe) {
+                if (!_al_unsafe) {
                   rc = -1;
                   snprintf(err, err_size,
                            "cave_null_target entry[%d] addr=0x%lx — cave target is null bytes, "
@@ -1656,7 +1588,7 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                 }
                 cr_log("warn", "cheats.mem",
                        "cave_null_target_bypassed entry[%d] addr=0x%lx len=%zu — null bytes at cave target, "
-                       "proceeding because allow_legacy=1; address may be wrong title=%s mod=%d",
+                       "proceeding because allow_unsafe=1; address may be wrong title=%s mod=%d",
                        pre_n, (long)addr, wlen, title_id, mod_index);
               }
             }
@@ -1715,14 +1647,8 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                    (long)addr, title_id, mod_index);
           } else {
             const uint8_t *must = (exp_len > 0) ? exp_bytes : off_bytes;
-            /* A cheat sitting in its ValueOff (disabled) state is a valid pre-ON
-             * baseline: after a disable cycle the address holds off_bytes, and for
-             * MC4/SHN cheats ValueOff frequently differs from the captured original
-             * bytes (exp_bytes from the addr_cache).  Comparing only against
-             * exp_bytes here made every cache-backed MC4 cheat fail to re-enable
-             * after being turned off ("bytes mismatch before ON").  Accept off_bytes
-             * as an equally-valid baseline — the same recovery logic already exists
-             * in the address-resolution stale-cache path. */
+            /* off_bytes is also a valid pre-ON baseline — exp_bytes alone made
+             * cache-backed MC4 cheats fail to re-enable after a disable. */
             int matches_baseline = (memcmp(cur_bytes, must, wlen) == 0) ||
                                    (off_len == wlen && memcmp(cur_bytes, off_bytes, wlen) == 0);
             if (!matches_baseline) {
@@ -1732,10 +1658,8 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                        "entry[%d] already_on at 0x%lx — re-enabling after session loss title=%s mod=%d",
                        pre_n, (long)addr, title_id, mod_index);
               } else if (wlen >= 16) {
-                /* Cave overwrite: a code cave (long write) is free-form writable space.
-                 * Allowed for same-file mode switching (e.g. speed cheats sharing a cave).
-                 * Blocked when mods from a different file are active — their hooks still
-                 * point to this cave; overwriting it causes a SIGSEGV when the hook fires. */
+                /* Cave overwrite ok for same-file mode switching; blocked across files
+                 * since another file's hooks may still point here (SIGSEGV risk). */
                 if (cheat_any_enabled_for_title(title_id, pid)) {
                   rc = -1;
                   snprintf(err, err_size,
@@ -1753,21 +1677,13 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                        "entry[%d] cave_overwrite at 0x%lx len=%zu — replacing existing cave content title=%s mod=%d",
                        pre_n, (long)addr, wlen, title_id, mod_index);
               } else if (wlen >= 5 && on_bytes[0] == 0xE9 && cur_bytes[0] == 0xE9) {
-                /* JMP redirect: both the current bytes and the ON bytes are JMP rel32
-                 * instructions. This means a compatible hook is already installed but
-                 * pointing to a different cave (e.g. Speed Normal → Speed 3x switch).
-                 * Redirecting one JMP to another is safe — allow it. */
+                /* Both sides are JMP rel32 — a compatible hook pointing elsewhere, safe to redirect. */
                 cr_log("info", "cheats",
                        "entry[%d] hook_redirect at 0x%lx — replacing JMP with new target title=%s mod=%d",
                        pre_n, (long)addr, title_id, mod_index);
               } else if (entry_ace_hit[pre_n]) {
-                /* The mismatch baseline came from the addr_cache, which is stale or
-                 * poisoned: its orig_bytes don't match live memory, and the target
-                 * isn't in the ON or ValueOff state either. Don't brick the cheat —
-                 * clear the cache and proceed as an unverified write at the resolved
-                 * address (which is just base+offset). This self-heals a bad cache
-                 * instead of failing every apply, and is reached even when
-                 * auto_detect=0 bypasses the resolve-time recovery path. */
+                /* Stale/poisoned addr_cache entry — clear it and proceed unverified
+                 * instead of bricking the cheat. */
                 cr_log("warn", "addr_cache",
                        "entry[%d] stale cache baseline at 0x%lx — clearing entry and applying unverified title=%s mod=%d",
                        pre_n, (long)addr, title_id, mod_index);
@@ -1830,10 +1746,8 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
     }
   }
 
-  /* ---- Cave-page promotion: reclassify short writes on known-cave pages ----
-   * A write >=16 bytes establishes its page as a "cave page" for this mod.
-   * Any shorter write to that same page is also part of the cave region and must
-   * follow the same enable/disable ordering (caves-first / hooks-first). */
+  /* A >=16 byte write marks its page as a cave page; shorter writes on that
+   * same page follow the same enable/disable ordering. */
   if (rc == 0 && pre_n > 1) {
     intptr_t cave_pgs[64];
     int cave_pg_n = 0;
@@ -1892,71 +1806,48 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
                "begin title=%s mod=%d write=%d addr=0x%lx len=%zu page=0x%lx span=0x%zx type=%s",
                title_id, mod_index, write_ok_n, (long)addr, wlen, (long)_pg, _sp,
                wi_is_cave[i] ? "cave" : "hook");
-        int used_cave = 0;
         /* write_process_memory_forced skips kernel_get_vmem_protection, preventing kernel
          * panics on PS4 BC games and PS5 games with special vmem entry types that cause
          * kernel_get_vmem_protection to dereference garbage before it can return -5. */
         int wrc = write_process_memory_forced(pid, addr, data, wlen);
-        if (wrc != 0 && codecave_fb) {
-          cr_log("info", "cheats.mem", "write failed trying codecave addr=0x%lx len=%zu rc=%d",
-                 (long)addr, wlen, wrc);
-          wrc = write_via_codecave(pid, addr, data, wlen);
-          if (wrc == 0) {
-            used_cave = 1;
-          }
-        }
-        cr_log("debug", "cheats.mem", "write_rc=%d cave=%d addr=0x%lx",
-               wrc, used_cave, (long)addr);
+        cr_log("debug", "cheats.mem", "write_rc=%d addr=0x%lx", wrc, (long)addr);
         if (wrc != 0) {
           rc = -1;
           snprintf(err, err_size, "entry[%d] write failed at 0x%lx (rc=%d)", i, (long)addr, wrc);
           break;
         }
-        if (!used_cave) {
-          /* write_process_memory_forced always restores PROT_READ|PROT_EXEC, so the page is
-           * always readable for the external readback verify. */
-          {
-            uint8_t cur_v[128];
-            int rdrc = read_process_memory(pid, addr, cur_v, wlen);
-            if (rdrc != 0) {
-              cr_log("warn", "cheats.mem",
-                     "ext_verify_unreadable addr=0x%lx len=%zu — write assumed ok",
-                     (long)addr, wlen);
-            } else if (memcmp(cur_v, data, wlen) != 0) {
-              /* Bytes didn't stick — try anonymous-mmap codecave before giving up */
-              if (codecave_fb && !wi_is_absolute[i] &&
-                  write_via_codecave(pid, addr, data, wlen) == 0) {
-                cr_log("info", "cheats.mem",
-                       "ext_verify_fail recovered via codecave addr=0x%lx len=%zu",
-                       (long)addr, wlen);
-                used_cave = 1;
-              } else {
-              char exp_h[52] = {0}, got_h[52] = {0};
-              fmt_hex16(data, wlen, exp_h, sizeof(exp_h));
-              fmt_hex16(cur_v, wlen, got_h, sizeof(got_h));
-              cr_log("error", "cheats.mem",
-                     "ext_verify_fail title=%s mod=%d write=%d addr=0x%lx exp=[%s] got=[%s]",
-                     title_id, mod_index, write_ok_n, (long)addr, exp_h, got_h);
-              rc = -1;
-              snprintf(err, err_size,
-                       "entry[%d] verify failed at 0x%lx — bytes not observed after write; see cheats.mem logs",
-                       i, (long)addr);
-              break;
-              }
-            }
-          }
-          /* PS5 is x86-64: i/d caches coherent; write_process_memory_forced already restored RX.
-           * restore_rx is a legacy flag (default=0). Only apply if explicitly set AND
-           * cheat_restore_original_prot is disabled, to avoid stomping the correct protection. */
-          cr_log("debug", "cheats.mem",
-                 "icache_sync addr=0x%lx len=%zu x86_coherent prot_handled_by_write_fn",
-                 (long)addr, wlen);
-          if (restore_rx && !restore_orig_prot) {
-            int rrc = kernel_mprotect(pid, _pg, _sp, PROT_READ | PROT_EXEC);
+        {
+          /* read_process_memory has its own XOM fallback if the page isn't readable. */
+          uint8_t cur_v[128];
+          int rdrc = read_process_memory(pid, addr, cur_v, wlen);
+          if (rdrc != 0) {
             cr_log("warn", "cheats.mem",
-                   "restore_rx_legacy page=0x%lx span=0x%zx rc=%d (deprecated: use cheat_restore_original_prot)",
-                   (long)_pg, _sp, rrc);
+                   "ext_verify_unreadable addr=0x%lx len=%zu — write assumed ok",
+                   (long)addr, wlen);
+          } else if (memcmp(cur_v, data, wlen) != 0) {
+            char exp_h[52] = {0}, got_h[52] = {0};
+            fmt_hex16(data, wlen, exp_h, sizeof(exp_h));
+            fmt_hex16(cur_v, wlen, got_h, sizeof(got_h));
+            cr_log("error", "cheats.mem",
+                   "ext_verify_fail title=%s mod=%d write=%d addr=0x%lx exp=[%s] got=[%s]",
+                   title_id, mod_index, write_ok_n, (long)addr, exp_h, got_h);
+            rc = -1;
+            snprintf(err, err_size,
+                     "entry[%d] verify failed at 0x%lx — bytes not observed after write; see cheats.mem logs",
+                     i, (long)addr);
+            break;
           }
+        }
+        /* x86-64 i/d caches are coherent, no flush needed. restore_rx is a legacy
+         * flag (default=0), only applies if explicitly set. */
+        cr_log("debug", "cheats.mem",
+               "icache_sync addr=0x%lx len=%zu x86_coherent prot_untouched_by_write_fn",
+               (long)addr, wlen);
+        if (restore_rx && !restore_orig_prot) {
+          int rrc = kernel_mprotect(pid, _pg, _sp, PROT_READ | PROT_EXEC);
+          cr_log("warn", "cheats.mem",
+                 "restore_rx_legacy page=0x%lx span=0x%zx rc=%d (deprecated: use cheat_restore_original_prot)",
+                 (long)_pg, _sp, rrc);
         }
         cr_log("info", "cheats", "write[%d] addr=0x%lx len=%zu type=%s ok",
                write_ok_n, (long)addr, wlen, wi_is_cave[i] ? "cave" : "hook");
@@ -2084,10 +1975,6 @@ apply_cheat_json(const char *title_id, int mod_index, int turn_on, char *err, si
     }
     g_last_apply_rec.write_count = wc;
     pthread_mutex_unlock(&g_last_apply_lock);
-  }
-
-  if (attached) {
-    pt_detach(pid, 0);
   }
 
   g_cheat_applying = 0;

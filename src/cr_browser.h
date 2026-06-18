@@ -5,12 +5,7 @@
 #define CHEATRUNNER_HAVE_BROWSER_OPEN 0
 #endif
 
-/*
- * cr_browser — thin wrapper around sceSystemServiceLaunchWebBrowser.
- * Opens the system browser at the given URL.
- * NOTE: This launches the normal system browser, NOT a confirmed in-game overlay.
- *       Overlay behavior is unconfirmed — test on console before enabling.
- */
+/* Opens the system browser at url via sceSystemServiceLaunchWebBrowser; overlay behavior is unconfirmed, test on console. */
 int cr_browser_open_url(const char *url);
 
 #endif /* CR_BROWSER_H */

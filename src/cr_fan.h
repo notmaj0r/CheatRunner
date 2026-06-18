@@ -3,16 +3,9 @@
 
 #include <stddef.h>
 
-/* CPU/SoC fan threshold control.
- *
- * Reads console temperatures and pins a fan-on threshold via the
- * /dev/icc_fan ioctl (requires kstuff to be loaded for the device to exist).
- * A watcher thread re-applies the pinned threshold periodically because the
- * firmware resets fan state on every game/app launch. The pinned value is
- * persisted to disk so it survives a payload redeploy. */
+/* Pins a fan-on threshold via /dev/icc_fan (needs kstuff); a watcher thread re-applies it since firmware resets fan state on every app launch. */
 
-/* Load the persisted threshold and start the re-apply watcher. Call once at
- * boot. Safe to call when /dev/icc_fan is unavailable (no-op until a set). */
+/* Loads the persisted threshold and starts the re-apply watcher; call once at boot, no-op if /dev/icc_fan is unavailable. */
 void fan_init(void);
 
 /* HTTP dispatcher — returns 1 if it handled the path, 0 otherwise.

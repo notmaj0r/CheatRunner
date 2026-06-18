@@ -10,6 +10,10 @@ static void send_asset(int fd, const char *content_type, const char *data) {
   http_send_response(fd, 200, content_type, (const uint8_t *)data, strlen(data));
 }
 
+static void send_static_asset(int fd, const char *content_type, const char *data) {
+  http_send_response_cached(fd, 200, content_type, (const uint8_t *)data, strlen(data));
+}
+
 int
 cr_api_dashboard_handle(int fd, const char *method, const char *path,
                          const char *query, const char *body, size_t body_len) {
@@ -20,16 +24,34 @@ cr_api_dashboard_handle(int fd, const char *method, const char *path,
     return 1;
   }
   if (!strcmp(path, "/dashboard.css")) {
-    send_asset(fd, "text/css; charset=utf-8", g_dashboard_css);
+    send_static_asset(fd, "text/css; charset=utf-8", g_dashboard_css);
     return 1;
   }
   if (!strcmp(path, "/dashboard.js")) {
-    send_asset(fd, "application/javascript; charset=utf-8", g_dashboard_js);
+    send_static_asset(fd, "application/javascript; charset=utf-8", g_dashboard_js);
     return 1;
   }
   if (!strcmp(path, "/CheatRunner.png") || !strcmp(path, "/favicon.png") ||
       !strcmp(path, "/icon.png")        || !strcmp(path, "/apple-touch-icon.png")) {
     http_send_png_asset(fd);
+    return 1;
+  }
+  if (!strcmp(path, "/cache.appcache")) {
+    static const char appcache[] =
+      "CACHE MANIFEST\n"
+      "# CheatRunner v0.14\n"
+      "# Build: " __DATE__ " " __TIME__ "\n"
+      "\n"
+      "CACHE:\n"
+      "/\n"
+      "/dashboard.css\n"
+      "/dashboard.js\n"
+      "/CheatRunner.png\n"
+      "\n"
+      "NETWORK:\n"
+      "*\n";
+    http_send_response(fd, 200, "text/cache-manifest; charset=utf-8",
+      (const uint8_t *)appcache, sizeof(appcache) - 1);
     return 1;
   }
   if (!strcmp(path, "/manifest.json")) {

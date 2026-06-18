@@ -57,9 +57,7 @@ find_pid_by_name(const char *name) {
   for (uint8_t *ptr = buf; ptr < (buf + buf_size);) {
     int ki_structsize = *(int *)ptr;
     if (ki_structsize <= 0 || (size_t)ki_structsize > (size_t)((buf + buf_size) - ptr)) break;
-    /* ki_pid at +72, ki_comm at +447 (MAXCOMLEN+1 = 20 bytes, last byte at 466).
-     * Need structsize >= 467; strict-less-than avoids off-by-one that would
-     * skip a record of exactly the minimum valid size. */
+    /* Need structsize >= 467 to cover ki_comm at +447..+466; avoids off-by-one. */
     if (ki_structsize < 467) { ptr += ki_structsize; continue; }
     pid_t ki_pid = *(pid_t *)&ptr[72];
     char *ki_tdname = (char *)&ptr[447];
@@ -120,9 +118,7 @@ get_running_game_ex(pid_t *out_pid, char *out_title, size_t title_size, intptr_t
   if (kill(pid, 0) != 0 && errno == ESRCH) {
     return -1;
   }
-  /* Get title ID: try sceSystemServiceGetAppTitleId first — faster and doesn't
-   * require reading from the process namespace.
-   * Fall back to sceKernelGetAppInfo if unavailable. */
+  /* Try the faster sceSystemServiceGetAppTitleId first, fall back to sceKernelGetAppInfo. */
   char title_id_buf[16] = {0};
   if (sceSystemServiceGetAppTitleId(app_id, title_id_buf) != 0 || title_id_buf[0] == '\0') {
     app_info_t info;
@@ -200,21 +196,8 @@ read_running_state(running_game_state_t *out) {
   if (!st.title_name[0]) {
     snprintf(st.title_name, sizeof(st.title_name), "%s", title);
   }
-  /* Version detection — probe in priority order:
-   *   1. /proc/{pid}/root/patch0  — installed update, contains the current game version
-   *   2. /proc/{pid}/root/app0    — base game, correct only when no update is installed
-   *   3. /app0                    — direct path (works if CheatRunner runs in the game namespace)
-   *   4. Static installed paths   — appmeta scan + known filesystem layout patterns
-   *
-   * The old "/proc/{pid}/root/user/patch/{title}/..." path was wrong: PS5 updates are
-   * mounted as patch0 inside the game's namespace, not under user/patch/. */
-  /* Per-pid version cache. Once a pid's version is known we never re-probe its
-   * filesystem again. Critical for robustness: reading /proc/{pid}/root/... of a
-   * FROZEN game (e.g. after a cave cheat strips WRITE and the game's next store
-   * page-faults) blocks the calling thread indefinitely in kernel VFS — this is
-   * what took CheatRunner down (monitor + HTTP threads all stuck → "network
-   * error" → resend ELF). A pid's game version never changes during its life, so
-   * caching is safe and also eliminates redundant per-500ms filesystem I/O. */
+  /* Probe patch0 (update), then app0, then /app0, then static paths; PS5 updates mount as patch0, not user/patch/. */
+  /* Cache version per pid: re-reading /proc/{pid}/root/... of a frozen game (cave cheat strips WRITE) blocks the thread in kernel VFS indefinitely, which previously hung the whole daemon. */
   static pthread_mutex_t ver_cache_lock = PTHREAD_MUTEX_INITIALIZER;
   static pid_t ver_cache_pid = -1;
   static char  ver_cache_cv[32];
@@ -402,13 +385,7 @@ rpc_refresh_title_and_notify(void) {
         }
         pthread_mutex_unlock(&g_mods_disabled_lock);
         mod_enabled_clear_for_pid(prev.pid);
-        /* Skip the ptrace-bearing patch restore while a cheat apply is in
-         * progress: the apply thread already owns this pid under ptrace, so a
-         * second pt_attach here would stall the 500 ms monitor poll for the full
-         * 2 s attach timeout and fail anyway (pid already traced). If the game
-         * genuinely died mid-apply the patched bytes are gone with the process,
-         * so there is nothing to restore; backups are still cleared below and the
-         * next poll re-evaluates once the apply releases. */
+        /* Skip restore mid-apply: it shares g_cheat_apply_lock with apply and would stall the monitor poll until apply releases it. */
         if (!g_cheat_applying) {
           patch_restore_all_for_pid(prev.pid, prev.title_id);
         }
@@ -451,9 +428,7 @@ rpc_refresh_title_and_notify(void) {
     }
   }
 
-  /* Auto-clear crash suspects whose watch window passed without a game crash.
-   * Runs every poll tick while the game is running. If a mod stayed enabled for
-   * longer than cheat_post_apply_watch_ms with no crash, it is no longer a suspect. */
+  /* Clear crash suspects that outlived cheat_post_apply_watch_ms with no crash. */
   if (cur.running) {
     int wcms = 8000;
     pthread_mutex_lock(&g_cfg_lock);

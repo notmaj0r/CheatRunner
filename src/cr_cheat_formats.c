@@ -211,10 +211,7 @@ mc4_decrypt_to_xml(const char *cipher, size_t cipher_len, size_t *xml_size_out) 
     *dst = '\0';
     out_len = (size_t)(dst - xml);
   }
-  /* Sanity-check: a successful AES decrypt on corrupted or wrong-key input
-   * produces garbage bytes that happen not to be NULL.  Valid XML always
-   * starts with '<'.  Catching this here prevents shn_xml_to_json() from
-   * silently returning an empty mod list with no error. */
+  /* Wrong-key/corrupted decrypt produces non-NULL garbage; valid XML always starts with '<'. */
   if (out_len == 0 || xml[0] != '<') {
     free(xml);
     return NULL;

@@ -27,7 +27,7 @@
 #include "cr_tile_pkg.h"
 
 #ifndef CHEATRUNNER_VERSION
-#define CHEATRUNNER_VERSION "0.1"
+#define CHEATRUNNER_VERSION "0.14"
 #endif
 
 /* Async-signal-safe crash handler: writes a one-line entry to the crash log
@@ -68,10 +68,11 @@ main(void) {
 
   cr_log_klog_banner();
 
-  puts(".------------------------------------.");
-  puts("|            CheatRunner             |");
-  puts("|       PS5 web launcher + cheats    |");
-  puts("'------------------------------------'");
+  puts("   ____ _                _   ____                              ");
+  puts("  / ___| |__   ___  __ _| |_|  _ \\ _   _ _ __  _ __   ___ _ __ ");
+  puts(" | |   | '_ \\ / _ \\/ _` | __| |_) | | | | '_ \\| '_ \\ / _ \\ '__|");
+  puts(" | |___| | | |  __/ (_| | |_|  _ <| |_| | | | | | | |  __/ |   ");
+  puts("  \\____|_| |_|\\___|\\__,_|\\__|_| \\_\\\\__,_|_| |_|_| |_|\\___|_|   ");
   log_msg("version: %s", CHEATRUNNER_VERSION);
 
 #ifdef __SCE__
@@ -94,19 +95,7 @@ main(void) {
   }
 #endif
 
-  /* Kill any previous CheatRunner instance before binding the HTTP port.
-   *
-   * On PS5, SYS_thr_set_name updates ki_comm (kinfo_proc offset 447) in
-   * addition to ki_tdname (offset 394) — both elfldr and elf-arsenal rely on
-   * this behaviour.  We search offset 447 for "CheatRunner.elf" which is what
-   * we set via thr_set_name above.
-   *
-   * EPERM means the old instance is escalated and we are not — break fast so
-   * we surface the error instead of spinning then flooding bind() logs.
-   * ESRCH means the process vanished between find_pid and kill — treat as gone.
-   *
-   * Cap at 60 spins (~9s) to guard against looping forever on a zombie.
-   * Zombies hold no sockets, so the port will be free even if we time out. */
+  /* Kill any previous instance before binding; EPERM (old instance escalated, we aren't) breaks fast, ESRCH treated as gone, capped at 60 spins so a zombie can't loop forever. */
   {
     int kill_spins = 0;
     while ((old_pid = find_pid_by_name("CheatRunner.elf")) > 0 && kill_spins < 60) {

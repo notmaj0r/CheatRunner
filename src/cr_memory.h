@@ -8,6 +8,10 @@
 #define ROUND_PG_DOWN(x) ((uintptr_t)(x) & ~(uintptr_t)0x3fff)
 #define ROUND_PG_UP(x) (((uintptr_t)(x) + 0x3fff) & ~(uintptr_t)0x3fff)
 
+/* Canonical x86-64 user-space limit — addresses outside this risk hitting
+ * kernel space or PS5 MMIO regions. */
+#define ADDR_IN_USER_RANGE(a) ((intptr_t)(a) >= 0x1000L && (intptr_t)(a) <= (intptr_t)0x7FFFFFFFFFFFL)
+
 int parse_offset_hex_checked(const char *s, uint64_t *out);
 int parse_hex_bytes_checked(const char *s, uint8_t *out, size_t out_cap, size_t *out_len);
 
@@ -61,14 +65,7 @@ int resolve_module_base(pid_t pid, const char *module_name, intptr_t eboot_base,
 /* Returns 1 if the process has libScePs2EmuMenuDialog.sprx loaded (PS2 emulation mode). */
 int process_is_ps2_emu(pid_t pid);
 
-/* Code-cave write: allocates an anonymous page at the target address via pt_mmap MAP_FIXED,
- * preserves surrounding code, writes data, then mprotects RX.
- * Use when write_process_memory_forced fails and codecave config is enabled. */
-int write_via_codecave(pid_t pid, intptr_t addr, const uint8_t *data, size_t len);
-
-/* Forced write: skips kernel_get_vmem_protection, uses RWX→write→RX directly.
- * Safe for all games including PS4 BC and PS5 games with special vmem entry types that
- * cause kernel_get_vmem_protection to panic. Always restores page to PROT_READ|PROT_EXEC. */
+/* Forced write via mdbg — bypasses page protection, never touches it, no ptrace. */
 int write_process_memory_forced(pid_t pid, intptr_t addr, const uint8_t *data, size_t len);
 
 

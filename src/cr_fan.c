@@ -159,10 +159,10 @@ fan_init(void) {
 
 static void
 send_obj(int fd, int status, cJSON *root) {
-  if (!root) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}"); return; }
+  if (!root) { http_send_oom(fd); return; }
   char *txt = cJSON_PrintUnformatted(root);
   cJSON_Delete(root);
-  if (!txt) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}"); return; }
+  if (!txt) { http_send_oom(fd); return; }
   http_send_json(fd, status, txt);
   free(txt);
 }

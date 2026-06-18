@@ -60,10 +60,10 @@
 #endif
 
 #ifndef CHEATRUNNER_VERSION
-#define CHEATRUNNER_VERSION "0.1"
+#define CHEATRUNNER_VERSION "0.14"
 #endif
 
-#define MAX_GAMES 1024
+#define MAX_GAMES CR_APPDB_MAX_GAMES
 
 const char g_dashboard_html[] =
 #include "dashboard_html.inc"
@@ -205,8 +205,36 @@ http_send_response(int fd, int status, const char *content_type, const uint8_t *
 }
 
 void
+http_send_response_cached(int fd, int status, const char *content_type, const uint8_t *body, size_t body_len) {
+  char header[512];
+  int n = snprintf(header, sizeof(header),
+                   "HTTP/1.1 %d %s\r\n"
+                   "Content-Type: %s\r\n"
+                   "Content-Length: %u\r\n"
+                   "Connection: close\r\n"
+                   "Access-Control-Allow-Origin: *\r\n"
+                   "Cache-Control: public, max-age=3600\r\n"
+                   "\r\n",
+                   status, status_text_for(status), content_type ? content_type : "application/octet-stream",
+                   (unsigned int)body_len);
+  if (n > 0) {
+    if (socket_send_all(fd, header, (size_t)n) != 0) {
+      return;
+    }
+    if (body_len > 0) {
+      (void)socket_send_all(fd, body, body_len);
+    }
+  }
+}
+
+void
 http_send_json(int fd, int status, const char *body) {
   http_send_response(fd, status, "application/json", (const uint8_t *)body, strlen(body));
+}
+
+void
+http_send_oom(int fd) {
+  http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}");
 }
 
 static int
@@ -475,7 +503,7 @@ handle_api_logs(int fd, const char *query) {
   char *txt = cJSON_PrintUnformatted(root);
   cJSON_Delete(root);
   if (!txt) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
+    http_send_oom(fd);
     return;
   }
   http_send_response(fd, 200, "application/json", (const uint8_t *)txt, strlen(txt));
@@ -510,7 +538,7 @@ handle_api_notifications(int fd) {
   char *txt = cJSON_PrintUnformatted(root);
   cJSON_Delete(root);
   if (!txt) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
+    http_send_oom(fd);
     return;
   }
   http_send_response(fd, 200, "application/json", (const uint8_t *)txt, strlen(txt));
@@ -568,7 +596,7 @@ handle_api_activity(int fd) {
   char *txt = cJSON_PrintUnformatted(root);
   cJSON_Delete(root);
   if (!txt) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
+    http_send_oom(fd);
     return;
   }
   http_send_response(fd, 200, "application/json", (const uint8_t *)txt, strlen(txt));
@@ -604,7 +632,7 @@ handle_api_activity_title(int fd, const char *query) {
   char *txt = cJSON_PrintUnformatted(root);
   cJSON_Delete(root);
   if (!txt) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
+    http_send_oom(fd);
     return;
   }
   http_send_response(fd, 200, "application/json", (const uint8_t *)txt, strlen(txt));
@@ -859,11 +887,11 @@ handle_api_games(int fd, const char *query) {
   if (debug_names) {
     size_t cap = 262144;
     char *arr = malloc(cap);
-    if (!arr) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}"); return; }
+    if (!arr) { http_send_oom(fd); return; }
     size_t arr_len = build_games_json_array(arr, cap, 1);
     size_t resp_cap = arr_len + 32;
     char *resp = malloc(resp_cap);
-    if (!resp) { free(arr); http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}"); return; }
+    if (!resp) { free(arr); http_send_oom(fd); return; }
     size_t resp_len = (size_t)snprintf(resp, resp_cap, "{\"ok\":true,\"games\":%.*s}", (int)arr_len, arr);
     http_send_response(fd, 200, "application/json", (const uint8_t *)resp, resp_len);
     free(resp); free(arr);
@@ -957,7 +985,7 @@ handle_api_games(int fd, const char *query) {
   }
   size_t resp_cap = arr_len + 128;
   char *resp = malloc(resp_cap);
-  if (!resp) { free(arr_copy); http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}"); return; }
+  if (!resp) { free(arr_copy); http_send_oom(fd); return; }
   size_t resp_len = (size_t)snprintf(resp, resp_cap,
                                      "{\"ok\":true,\"games\":%.*s,\"refreshing\":%s,\"cacheAgeMs\":%lld,\"throttled\":%s}",
                                      (int)arr_len, arr_copy, busy ? "true" : "false",
@@ -1104,7 +1132,7 @@ handle_api_cheats_index(int fd) {
   cJSON *files = cJSON_AddArrayToObject(root, "files");
   if (!root || !files) {
     cJSON_Delete(root);
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
+    http_send_oom(fd);
     return;
   }
   cJSON_AddBoolToObject(root, "ok", 1);
@@ -1182,7 +1210,7 @@ handle_api_cheats_index(int fd) {
   char *body = cJSON_PrintUnformatted(root);
   cJSON_Delete(root);
   if (!body) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
+    http_send_oom(fd);
     return;
   }
   http_send_response(fd, 200, "application/json", (const uint8_t *)body, strlen(body));
@@ -1298,7 +1326,7 @@ handle_api_cheats_get(int fd, const char *query) {
   char *out = malloc(base_len + (size_t)inj + 1);
   if (!out) {
     free(json);
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}");
+    http_send_oom(fd);
     return;
   }
   memcpy(out, json, base_len);
@@ -1308,10 +1336,7 @@ handle_api_cheats_get(int fd, const char *query) {
   free(out);
 }
 
-/* Single-slot cache: stores the decoded JSON text (post-decrypt) keyed by
- * (title_id, path, mtime, kind). Avoids repeated disk reads + MC4/SHN decryption
- * on every /api/cheats/state poll. cJSON_Parse from memory is ~10x faster than
- * reading + decrypting from disk. */
+/* Single-slot decoded-JSON cache keyed by (title_id, path, mtime, kind); avoids re-decrypting MC4/SHN on every state poll. */
 static struct {
   pthread_mutex_t lock;
   char title_id[10];
@@ -1334,9 +1359,7 @@ static struct {
  * Must be called after the doc cache has been loaded (we borrow the cached JSON). */
 static void
 conflict_cache_ensure(const char *path, time_t mtime) {
-  /* Check + build under a single lock acquisition to prevent two concurrent
-   * callers from both passing the staleness check and double-building (and
-   * double-leaking the ~48 KB entries_p inside conflict_map_build). */
+  /* Check+build under one lock so two concurrent callers can't both double-build (and leak entries_p). */
   pthread_mutex_lock(&g_conflict_cache.lock);
   if (g_conflict_cache.ready &&
       g_conflict_cache.mtime == mtime &&
@@ -1651,23 +1674,14 @@ handle_api_cheats_state(int fd, const char *query) {
   if (can_probe && kill(pid, 0) != 0 && errno == ESRCH) {
     can_probe = 0;
   }
-  /* Skip ptrace entirely while an apply is in progress — the game is already
-   * paused under ptrace by the apply thread; attaching again from here races
-   * with that attach and hangs for the full timeout. */
+  /* Skip ptrace during an apply — attaching again here races the apply thread's attach and hangs. */
   if (can_probe && g_cheat_applying) {
     can_probe = 0;
   }
+  /* Probing reads are mdbg-backed and need no ptrace attach. */
   if (can_probe) {
-    int _at = pt_attach_timed(pid, 1000);
-    if (_at == 0) {
-      attach_ok = 1;
-      is_ps2_st = process_is_ps2_emu(pid);
-    } else {
-      if (_at == -2) {
-        cr_log("warn", "cheats", "pt_attach timeout on state check pid=%d title=%s", (int)pid, title_id);
-      }
-      can_probe = 0;
-    }
+    attach_ok = 1;
+    is_ps2_st = process_is_ps2_emu(pid);
   }
   const char *fmt = cheat_kind == 1 ? "json" : (cheat_kind == 2 ? "shn" : "mc4");
   cr_log("debug", "cheats", "loaded file=%s format=%s mods=%d", cheat_path, fmt, cJSON_GetArraySize(mods));
@@ -1897,24 +1911,12 @@ handle_api_cheats_state(int fd, const char *query) {
         get_cheat_addr_flags(cheat_kind, cJSON_IsTrue(abs_j) ? 1 : 0, auto_detect, &af_s, &inj_s, &adet_s);
         /* PS2 emulation: all addresses absolute (matches apply_cheat_json). */
         if (is_ps2_st) { af_s = 1; inj_s = 0; adet_s = 0; }
-        /* Determine expected reliability: JSON off_bytes and explicit expected are reliable;
-         * MC4/SHN ValueOff is not. */
+        /* JSON off_bytes/explicit expected are reliable; MC4/SHN ValueOff is not. */
         int exp_rel_s = (exp_len > 0) || (cheat_kind == 1 && off_len > 0);
         const uint8_t *expect_cmp_s = exp_rel_s ? (exp_len > 0 ? exp_b : off_b) : NULL;
-        /* For state reads, always resolve via legacy fallback so MC4/SHN get a usable address.
-         * When there are no reliable expected bytes, skip the x86/offbytes probe entirely:
-         * the probe reads both address candidates blindly, and if either address maps to a
-         * PS5 GPU/MMIO region the kernel page-fault never returns, hanging the game under
-         * ptrace before any cheat is applied. The probe result is discarded anyway when
-         * baseline_unknown is the expected outcome. */
+        /* Skip the offbytes probe when there's no reliable expected: a blind read can hit PS5 GPU/MMIO and hang under ptrace. */
         const char *fb_str_s = (cheat_kind == 2) ? shn_fb_s : mc4_fb_s;
-        /* Passive state read must default to RELATIVE: for non-absolute MC4/SHN
-         * the raw offset can map to PS5 GPU/MMIO, and reading it first under
-         * ptrace page-faults forever — freezing the game just from opening the
-         * cheat page. The relative candidate (base+offset) is the correct target
-         * for these cheats anyway. Honor an explicit "absolute"/"block" config,
-         * but treat the deprecated "legacy" magnitude heuristic (and any unknown
-         * value) as relative here so a misconfig can't freeze a passive poll. */
+        /* Default passive reads to RELATIVE: a raw MC4/SHN offset can hit PS5 GPU/MMIO and freeze the game just from polling state. */
         cr_addr_fallback_policy_t fb_pol_s = CR_ADDR_FALLBACK_RELATIVE;
         if (!exp_rel_s) {
           if (strcmp(fb_str_s, "absolute") == 0)      fb_pol_s = CR_ADDR_FALLBACK_ABSOLUTE;
@@ -1954,9 +1956,7 @@ handle_api_cheats_state(int fd, const char *query) {
         /* For MC4/SHN without explicit expected bytes, off_b is NOT a reliable original */
         int off_reliable = (cheat_kind == 1) || (exp_len > 0);
         int is_off = off_reliable && (memcmp(cur, (exp_len > 0 ? exp_b : off_b), on_len) == 0);
-        /* cross_mod_inactive: another mod has claimed this address (cave or JMP redirect).
-         * Treat as OFF so mutually exclusive cheats (e.g. speed modes sharing a hook) show
-         * as "off" in the UI instead of "error/mismatch". */
+        /* Another mod claimed this address (cave/JMP redirect) — treat as OFF, not mismatch, for mutually-exclusive cheats. */
         int cross_mod_inactive = 0;
         if (!is_on && !is_off && off_reliable) {
           if (on_len >= 16) {
@@ -1982,10 +1982,7 @@ handle_api_cheats_state(int fd, const char *query) {
           }
         }
         if (!is_on && !off_reliable) {
-          /* MC4/SHN without reliable baseline: check if current bytes match ValueOff.
-           * A ValueOff match means the cheat was disabled (or never applied).
-           * Count separately so the state decision can emit OFF_UNVERIFIED rather
-           * than BASELINE_UNKNOWN — this survives CheatRunner restarts. */
+          /* ValueOff match means disabled/never-applied; counted separately so state can be OFF_UNVERIFIED, not BASELINE_UNKNOWN. */
           if (off_len > 0 && memcmp(cur, off_b, on_len) == 0) {
             off_val_matches++;
           } else {
@@ -2083,9 +2080,7 @@ handle_api_cheats_state(int fd, const char *query) {
           state = CHEAT_STATE_OFF_UNVERIFIED;
           reason = "MC4/SHN: ValueOff bytes match current memory; cheat appears disabled.";
         } else if (baseline_unknown > 0 && mismatch == 0 && on_matches == 0) {
-          /* No ON matches, no reliable-baseline mismatches — cheat is not active.
-           * Some entries may match ValueOff (soft OFF) and others may not (truly unknown);
-           * either way the cheat is not applied, so report BASELINE_UNKNOWN not MIXED. */
+          /* No ON matches, no reliable mismatches — not applied either way, so report BASELINE_UNKNOWN not MIXED. */
           state = CHEAT_STATE_BASELINE_UNKNOWN;
           reason = "MC4/SHN: no reliable original bytes; state cannot be confirmed";
         } else {
@@ -2226,9 +2221,6 @@ handle_api_cheats_state(int fd, const char *query) {
     }
     cJSON_AddItemToArray(arr, e);
   }
-  if (attach_ok) {
-    pt_detach(pid, 0);
-  }
   cJSON_Delete(root);
   cJSON *summary = cJSON_AddObjectToObject(out, "summary");
   if (summary) {
@@ -2244,7 +2236,7 @@ handle_api_cheats_state(int fd, const char *query) {
   char *txt = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
   if (!txt) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
+    http_send_oom(fd);
     return;
   }
   http_send_response(fd, 200, "application/json", (const uint8_t *)txt, strlen(txt));
@@ -2277,10 +2269,7 @@ handle_api_cheats_clear_crash_flags(int fd, const char *query) {
   http_send_json(fd, 200, body);
 }
 
-/* POST /api/cheats/select?titleId=CUSA00900&path=<full-path>[&force=1]
- * Manually select a specific cheat file for a title.
- * path must be present in the current candidates list (validated against scan results).
- * wrong_version candidates require force=1. */
+/* POST /api/cheats/select: path must be in the current candidates list; wrong_version requires force=1. */
 void
 handle_api_cheats_select(int fd, const char *query) {
   char raw_tid[32] = {0}, title_id[10] = {0};
@@ -2488,13 +2477,11 @@ check_mod_enable_state(const char *title_id, int mod_index, char *reason, size_t
       return fast_st;
     }
   }
-  {
-    int _at = pt_attach_timed(st.pid, 2000);
-    if (_at < 0) {
-      cJSON_Delete(root);
-      snprintf(reason, reason_size, _at == -2 ? "pt_attach timed out" : "pt_attach failed");
-      return CHEAT_STATE_PROCESS_NOT_FOUND;
-    }
+  /* read_process_memory is mdbg-backed and needs no ptrace attach. */
+  if (kill(st.pid, 0) != 0 && errno == ESRCH) {
+    cJSON_Delete(root);
+    snprintf(reason, reason_size, "game has exited");
+    return CHEAT_STATE_PROCESS_NOT_FOUND;
   }
   int is_ps2_cme = process_is_ps2_emu(st.pid);
   cheat_state_kind_t state = CHEAT_STATE_UNKNOWN;
@@ -2603,7 +2590,6 @@ check_mod_enable_state(const char *title_id, int mod_index, char *reason, size_t
       }
     }
   }
-  pt_detach(st.pid, 0);
   cJSON_Delete(root);
   /* Block crash_suspect mods from being re-enabled */
   if (state != CHEAT_STATE_ON) {
@@ -2648,9 +2634,7 @@ classify_cheat_error_code(const char *msg, char *out, size_t out_size) {
   snprintf(out, out_size, "%s", code);
 }
 
-/* GET /api/cheats/apply-dryrun?titleId=X&mod=N
-   Returns what a real apply would do: resolved addresses, current bytes,
-   page protection, ON bytes — no actual writes. */
+/* GET /api/cheats/apply-dryrun: shows what a real apply would do (addresses, bytes, protection) with no writes. */
 void
 handle_api_cheats_apply_dryrun(int fd, const char *query) {
   char raw_title_id[32] = {0};
@@ -2697,9 +2681,10 @@ handle_api_cheats_apply_dryrun(int fd, const char *query) {
   auto_detect = g_cfg.cheat_address_auto_detect;
   pthread_mutex_unlock(&g_cfg_lock);
 
+  /* Probing reads are mdbg-backed and need no ptrace attach. */
   int attached = 0;
   if (running_ok && pid > 0) {
-    attached = (pt_attach_timed(pid, 2000) == 0);
+    attached = (kill(pid, 0) == 0 || errno != ESRCH);
   }
   int is_ps2_dr = attached ? process_is_ps2_emu(pid) : 0;
 
@@ -2824,7 +2809,6 @@ handle_api_cheats_apply_dryrun(int fd, const char *query) {
     }
   }
 
-  if (attached) pt_detach(pid, 0);
   cJSON_Delete(root);
 
   char *body = cJSON_PrintUnformatted(out);
@@ -3144,10 +3128,7 @@ handle_api_cheats_upload(int fd, const char *query, const char *body, size_t bod
   http_send_json(fd, 200, resp);
 }
 
-/* Task 13: /api/cheats/address-debug?titleId=X
-   For each patch in the cheat file: computes absolute & relative candidate
-   addresses, reads bytes from both, and shows which one matches on/off/expected.
-   Only works if the game is currently running. */
+/* GET /api/cheats/address-debug: shows which of absolute/relative candidate addresses matches on/off/expected; needs game running. */
 void
 handle_api_cheats_address_debug(int fd, const char *query) {
   char raw_title_id[32] = {0};
@@ -3183,9 +3164,10 @@ handle_api_cheats_address_debug(int fd, const char *query) {
   snprintf(shn_fb_adbg, sizeof(shn_fb_adbg), "%s", g_cfg.cheat_shn_unverified_fallback);
   pthread_mutex_unlock(&g_cfg_lock);
 
+  /* Probing reads are mdbg-backed and need no ptrace attach. */
   int attach_ok = 0;
   if (title_match && pid > 0 && base != 0) {
-    attach_ok = (pt_attach_timed(pid, 2000) == 0);
+    attach_ok = (kill(pid, 0) == 0 || errno != ESRCH);
   }
 
   cJSON *mods = cJSON_GetObjectItem(root, "mods");
@@ -3363,12 +3345,11 @@ handle_api_cheats_address_debug(int fd, const char *query) {
     }
   }
 
-  if (attach_ok) { pt_detach(pid, 0); }
   cJSON_Delete(root);
 
   char *s = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
-  if (!s) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!s) { http_send_oom(fd); return; }
   http_send_json(fd, 200, s);
   free(s);
 }
@@ -3394,7 +3375,7 @@ handle_api_cheats_sources(int fd) {
   char *txt = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
   if (!txt) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}");
+    http_send_oom(fd);
     return;
   }
   http_send_json(fd, 200, txt);
@@ -3450,14 +3431,14 @@ handle_api_sources_jobs_status(int fd, const char *query) {
   }
   cJSON *out = cr_source_job_status_json(job_id);
   if (!out) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}");
+    http_send_oom(fd);
     return;
   }
   int status = cJSON_GetObjectItem(out, "notFound") ? 404 : 200;
   char *txt = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
   if (!txt) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}");
+    http_send_oom(fd);
     return;
   }
   http_send_json(fd, status, txt);
@@ -3585,7 +3566,7 @@ cheats_list_scan_subdir(const char *fmt_name, int kind, cJSON *arr) {
 void
 handle_api_cheats_list(int fd) {
   cJSON *out = cJSON_CreateObject();
-  if (!out) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!out) { http_send_oom(fd); return; }
   cJSON_AddBoolToObject(out, "ok", 1);
   cJSON *arr = cJSON_AddArrayToObject(out, "files");
 
@@ -3627,7 +3608,7 @@ handle_api_cheats_list(int fd) {
 
   char *txt = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
-  if (!txt) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!txt) { http_send_oom(fd); return; }
   http_send_json(fd, 200, txt);
   free(txt);
 }
@@ -3689,22 +3670,12 @@ handle_api_cheats_download_all_status(int fd) {
   handle_api_cheats_repo_download_status(fd);
 }
 
-void
-handle_api_cheats_index_status(int fd) {
-  http_send_json(fd, 200, "{\"ok\":true,\"available\":false,\"indexes\":[]}");
-}
-
-void
-handle_api_cheats_index_refresh(int fd) {
-  http_send_json(fd, 410, "{\"ok\":false,\"error\":\"remote_index_removed\"}");
-}
-
 /* ── /api/dev/privileges ────────────────────────────────────────── */
 void
 handle_api_dev_privileges(int fd) {
   const cr_priv_status_t *ps = cr_priv_get();
   cJSON *out = cJSON_CreateObject();
-  if (!out) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!out) { http_send_oom(fd); return; }
 
   cJSON_AddBoolToObject(out, "ok", ps->can_patch_game ? 1 : 0);
   cJSON_AddNumberToObject(out, "uid", ps->uid);
@@ -3736,7 +3707,7 @@ handle_api_dev_privileges(int fd) {
 
   char *s = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
-  if (!s) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!s) { http_send_oom(fd); return; }
   http_send_json(fd, 200, s);
   free(s);
 }
@@ -3745,12 +3716,12 @@ handle_api_dev_privileges(int fd) {
 void
 handle_api_dev_diag(int fd) {
   cJSON *out = cJSON_CreateObject();
-  if (!out) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!out) { http_send_oom(fd); return; }
   cJSON_AddBoolToObject(out, "ok", 1);
 
   char *s = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
-  if (!s) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!s) { http_send_oom(fd); return; }
   http_send_json(fd, 200, s);
   free(s);
 }
@@ -3810,7 +3781,7 @@ handle_api_dev_open_browser(int fd, const char *method, const char *query) {
 void
 handle_api_dev_memtest(int fd) {
   cJSON *out = cJSON_CreateObject();
-  if (!out) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!out) { http_send_oom(fd); return; }
 
   cJSON_AddBoolToObject(out, "ok", 1);
 
@@ -3863,9 +3834,7 @@ handle_api_dev_memtest(int fd) {
         intptr_t pg = (intptr_t)ROUND_PG_DOWN((uintptr_t)rgs.image_base);
         size_t sp = (size_t)0x4000;
         int orig_prot = kernel_get_vmem_protection(rgs.pid, pg, sp);
-        /* This is a read-only probe — only ensure the page is readable+executable.
-         * Never set W+X (PROT_WRITE | PROT_EXEC): PS5's hypervisor enforces W^X and
-         * a writable+executable code mapping can trigger a kernel panic. */
+        /* Read-only probe: never set W+X here, PS5's hypervisor enforces W^X and RWX can panic the kernel. */
         mprotect_rc = kernel_mprotect(rgs.pid, pg, sp, PROT_READ | PROT_EXEC);
         if (mprotect_rc == 0) {
           attach_rc = pt_attach_timed(rgs.pid, 2000);
@@ -3892,14 +3861,14 @@ handle_api_dev_memtest(int fd) {
 
   char *s = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
-  if (!s) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!s) { http_send_oom(fd); return; }
   http_send_json(fd, 200, s);
   free(s);
 }
 
 void
-handle_api_dev_shutdown(int fd, const char *method, const char *query, const char *token_header, const char *client_ip) {
-  (void)query; (void)token_header;
+handle_api_dev_shutdown(int fd, const char *method, const char *query, const char *client_ip) {
+  (void)query;
   int enabled = 0;
   int delay_ms = 700;
   char body[512];
@@ -4032,7 +4001,7 @@ handle_api_diag_title(int fd, const char *query) {
   }
   cJSON *out = cJSON_CreateObject();
   if (!out) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}");
+    http_send_oom(fd);
     return;
   }
   cJSON_AddBoolToObject(out, "ok", 1);
@@ -4230,7 +4199,7 @@ handle_api_diag_title(int fd, const char *query) {
 
   char *s = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
-  if (!s) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!s) { http_send_oom(fd); return; }
   http_send_json(fd, 200, s);
   free(s);
 }
@@ -4250,7 +4219,7 @@ handle_api_cheats_scan(int fd, const char *query) {
 
   cJSON *out = cJSON_CreateObject();
   if (!out) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}");
+    http_send_oom(fd);
     return;
   }
   cJSON_AddBoolToObject(out, "ok", 1);
@@ -4278,7 +4247,7 @@ handle_api_cheats_scan(int fd, const char *query) {
   }
   char *s = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
-  if (!s) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!s) { http_send_oom(fd); return; }
   http_send_json(fd, 200, s);
   free(s);
 }
@@ -4309,7 +4278,7 @@ handle_api_cheats_mc4_debug(int fd, const char *query) {
   cJSON *out = cJSON_CreateObject();
   if (!out) {
     cJSON_Delete(root);
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}");
+    http_send_oom(fd);
     return;
   }
   cJSON_AddBoolToObject(out, "ok", 1);
@@ -4381,7 +4350,7 @@ handle_api_cheats_mc4_debug(int fd, const char *query) {
   cJSON_Delete(root);
   char *s = cJSON_PrintUnformatted(out);
   cJSON_Delete(out);
-  if (!s) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"oom\"}"); return; }
+  if (!s) { http_send_oom(fd); return; }
   http_send_json(fd, 200, s);
   free(s);
 }
@@ -4458,7 +4427,7 @@ http_send_png_asset(int fd) {
 }
 
 void
-http_route(int fd, const char *method, const char *path, const char *query, const char *token_header,
+http_route(int fd, const char *method, const char *path, const char *query,
            const char *client_ip, const char *body, size_t body_len) {
   if (!g_startup_ms) {
     struct timespec _ts; clock_gettime(CLOCK_MONOTONIC, &_ts);
@@ -4477,9 +4446,9 @@ http_route(int fd, const char *method, const char *path, const char *query, cons
   if (cr_api_logs_handle(fd, method, path, query, body, body_len)) return;
   if (cr_api_fan_handle(fd, method, path, query, body, body_len)) return;
   if (cr_api_profile_handle(fd, method, path, query, body, body_len)) return;
-  /* shutdown needs token_header + client_ip - handle directly */
+  /* shutdown needs client_ip - handle directly */
   if (!strcmp(path, "/api/dev/shutdown")) {
-    handle_api_dev_shutdown(fd, method, query, token_header, client_ip);
+    handle_api_dev_shutdown(fd, method, query, client_ip);
     return;
   }
   if (cr_api_dev_handle(fd, method, path, query, body, body_len)) return;

@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include "cr_titles.h"
 
+/* Required capacity of entries[] passed to appdb_collect_games. */
+#define CR_APPDB_MAX_GAMES 1024
+
 int appdb_collect_games(game_entry_t *entries, size_t *count);
 
 int resolve_icon_path(const char *title_id, char *out, size_t out_size);

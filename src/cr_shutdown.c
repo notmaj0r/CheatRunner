@@ -12,6 +12,8 @@
 volatile int g_shutdown_requested = 0;
 extern volatile int g_game_monitor_running;
 extern int g_http_listen_fd;
+/* Held by cr_cheats.c during a cheat apply/disable's writes. */
+extern pthread_mutex_t g_cheat_apply_lock;
 
 static void
 close_fd_safe(int *fd) {
@@ -26,6 +28,14 @@ close_fd_safe(int *fd) {
 void
 cheatrunner_close_servers(void) {
   close_fd_safe(&g_http_listen_fd);
+}
+
+/* Wait for any in-flight cheat apply to finish, then kill. */
+static void
+kill_after_no_apply_in_flight(void) {
+  pthread_mutex_lock(&g_cheat_apply_lock);
+  kill(getpid(), SIGKILL);
+  _exit(0);
 }
 
 static void *
@@ -44,12 +54,10 @@ delayed_shutdown_thread(void *arg) {
   activity_save();
   notifications_save();
   cr_log("info", "dev", "CheatRunner exiting for reload");
-  kill(getpid(), SIGKILL);
-  /* Guaranteed exit: if self-SIGKILL is somehow refused/deferred (PS5 credential
-   * quirk), fall through to _exit so the process always dies — otherwise the
-   * thread would just return and CheatRunner would keep running ("shutdown
-   * didn't work"). */
-  _exit(0);
+  /* Guaranteed exit: kill_after_no_apply_in_flight always reaches SIGKILL/_exit,
+   * so the thread never just returns and leaves CheatRunner running
+   * ("shutdown didn't work"). */
+  kill_after_no_apply_in_flight();
   return NULL;
 }
 
@@ -60,8 +68,7 @@ cheatrunner_request_shutdown(int delay_ms) {
     g_shutdown_requested = 1;
     g_game_monitor_running = 0;
     cheatrunner_close_servers();
-    kill(getpid(), SIGKILL);
-    _exit(0);
+    kill_after_no_apply_in_flight();
     return;
   }
   *p = delay_ms;
@@ -74,6 +81,5 @@ cheatrunner_request_shutdown(int delay_ms) {
   g_shutdown_requested = 1;
   g_game_monitor_running = 0;
   cheatrunner_close_servers();
-  kill(getpid(), SIGKILL);
-  _exit(0);
+  kill_after_no_apply_in_flight();
 }

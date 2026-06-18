@@ -15,15 +15,35 @@ notification_entry_t g_notifications[MAX_NOTIFICATIONS];
 int                  g_notifications_count = 0;
 int                  g_notification_next_id = 1;
 
+static void *
+notify_send_thread(void *arg) {
+  notify_request_t *req = arg;
+  sceKernelSendNotificationRequest(0, req, sizeof(*req), 0);
+  free(req);
+  return NULL;
+}
+
+/* Fire-and-forget on a detached thread — sceKernelSendNotificationRequest can
+ * stall under rapid repeated calls, and notify() is often called while a
+ * caller still holds g_cheat_apply_lock. */
 void
 notify(const char *fmt, ...) {
-  notify_request_t req;
+  notify_request_t *req = malloc(sizeof(*req));
+  if (!req) return;
   va_list args;
-  bzero(&req, sizeof(req));
+  bzero(req, sizeof(*req));
   va_start(args, fmt);
-  vsnprintf(req.message, sizeof(req.message), fmt, args);
+  vsnprintf(req->message, sizeof(req->message), fmt, args);
   va_end(args);
-  sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+
+  pthread_t t;
+  pthread_attr_t a;
+  pthread_attr_init(&a);
+  pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+  if (pthread_create(&t, &a, notify_send_thread, req) != 0) {
+    free(req);
+  }
+  pthread_attr_destroy(&a);
 }
 
 void

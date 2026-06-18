@@ -22,7 +22,6 @@ cheatrunner_config_t g_cfg = {
     .cheat_validate_original_bytes = 1,
     .cheat_restore_rx = 0,
     .cheat_restore_original_prot = 1,
-    .cheat_index_cache_ttl_sec = 86400,
     .allow_force_enable = 0,
     .cheat_state_after_launch_delay_ms = 8000,
     .launch_post_timeout_grace_ms = 3000,
@@ -43,7 +42,6 @@ cheatrunner_config_t g_cfg = {
     .cheat_mc4_unverified_fallback = "relative",
     .cheat_shn_unverified_fallback = "relative",
     .cheat_log_candidates = 0,
-    .launch_quick_verify_ms = 5000,
     .cheat_post_apply_watch_ms = 8000,
     .cheat_mark_crash_suspect = 1,
     .cheat_apply_one_at_a_time = 1,
@@ -60,12 +58,9 @@ cheatrunner_config_t g_cfg = {
     .games_cache_ttl_ms = 30000,
     .appdb_debug_names = 0,
     .log_level = "info",
-    /* Enabled by default for MC4/SHN code-cave + master-code cheat compatibility.
-     * Both are additive (codecave_fallback only engages when a write doesn't stick;
-     * master_code_fixup only for MC-dependent mods), so currently-working cheats
-     * are unaffected. */
+    /* Enabled by default: additive, only engages for MC-dependent mods, so
+     * currently-working cheats are unaffected. */
     .cheat_master_code_fixup = 1,
-    .cheat_codecave_fallback = 1,
     .cheat_addr_cache_enabled = 1,
     .cheat_inter_mod_delay_ms = 0,
     .fan_min_c = 30,
@@ -88,7 +83,6 @@ config_set_defaults(cheatrunner_config_t *cfg) {
       .cheat_validate_original_bytes = 1,
       .cheat_restore_rx = 0,
       .cheat_restore_original_prot = 1,
-      .cheat_index_cache_ttl_sec = 86400,
       .allow_force_enable = 0,
       .cheat_state_after_launch_delay_ms = 8000,
       .launch_post_timeout_grace_ms = 3000,
@@ -106,7 +100,6 @@ config_set_defaults(cheatrunner_config_t *cfg) {
       .cheat_mc4_unverified_fallback = "relative",
       .cheat_shn_unverified_fallback = "relative",
       .cheat_log_candidates = 0,
-      .launch_quick_verify_ms = 5000,
       .cheat_post_apply_watch_ms = 8000,
       .cheat_mark_crash_suspect = 1,
       .cheat_apply_one_at_a_time = 1,
@@ -124,7 +117,6 @@ config_set_defaults(cheatrunner_config_t *cfg) {
       .appdb_debug_names = 0,
       .log_level = "info",
       .cheat_master_code_fixup = 0,
-      .cheat_codecave_fallback = 0,
       .cheat_addr_cache_enabled = 1,
       .cheat_inter_mod_delay_ms = 0,
       .fan_min_c = 30,
@@ -143,12 +135,10 @@ config_save_locked(void) {
       "launch_kill_current=%d\n"
       "launch_kill_delay_ms=%d\n"
       "launch_wait_timeout_ms=%d\n"
-      "launch_quick_verify_ms=%d\n"
       "cheat_engine=%d\n"
       "cheat_validate_original_bytes=%d\n"
       "cheat_restore_rx=%d\n"
       "cheat_restore_original_prot=%d\n"
-      "cheat_index_cache_ttl_sec=%d\n"
       "allow_force_enable=%d\n"
       "cheat_state_after_launch_delay_ms=%d\n"
       "launch_post_timeout_grace_ms=%d\n"
@@ -182,7 +172,6 @@ config_save_locked(void) {
       "appdb_debug_names=%d\n"
       "log_level=%s\n"
       "cheat_master_code_fixup=%d\n"
-      "cheat_codecave_fallback=%d\n"
       "cheat_addr_cache_enabled=%d\n"
       "cheat_inter_mod_delay_ms=%d\n"
       "fan_min_c=%d\n"
@@ -190,10 +179,10 @@ config_save_locked(void) {
       "theme=%s\n",
       g_cfg.http_port, g_cfg.auto_load_cheat_menu,
       g_cfg.auto_download_missing_cheat, g_cfg.launch_kill_current,
-      g_cfg.launch_kill_delay_ms, g_cfg.launch_wait_timeout_ms, g_cfg.launch_quick_verify_ms,
+      g_cfg.launch_kill_delay_ms, g_cfg.launch_wait_timeout_ms,
       g_cfg.cheat_engine, g_cfg.cheat_validate_original_bytes,
       g_cfg.cheat_restore_rx, g_cfg.cheat_restore_original_prot,
-      g_cfg.cheat_index_cache_ttl_sec, g_cfg.allow_force_enable,
+      g_cfg.allow_force_enable,
       g_cfg.cheat_state_after_launch_delay_ms, g_cfg.launch_post_timeout_grace_ms, g_cfg.cheat_address_auto_detect,
       g_cfg.cheat_mc4_address_mode, g_cfg.cheat_shn_address_mode,
       g_cfg.allow_unsafe_mc4_apply, g_cfg.allow_unsafe_shn_apply,
@@ -209,7 +198,7 @@ config_save_locked(void) {
       g_cfg.cheat_source_cache_ttl_seconds, g_cfg.cheat_remote_max_file_bytes,
       g_cfg.title_lookup_enabled, g_cfg.title_lookup_cache_enabled, g_cfg.title_lookup_timeout_ms,
       g_cfg.games_cache_ttl_ms, g_cfg.appdb_debug_names, g_cfg.log_level,
-      g_cfg.cheat_master_code_fixup, g_cfg.cheat_codecave_fallback,
+      g_cfg.cheat_master_code_fixup,
       g_cfg.cheat_addr_cache_enabled, g_cfg.cheat_inter_mod_delay_ms,
       g_cfg.fan_min_c, g_cfg.fan_max_c,
       g_cfg.theme);
@@ -269,8 +258,6 @@ config_load(void) {
       g_cfg.cheat_restore_rx = atoi(v) ? 1 : 0;  /* legacy: kept for compat; default is now 0 */
     } else if (!strcmp(k, "cheat_restore_original_prot")) {
       g_cfg.cheat_restore_original_prot = atoi(v) ? 1 : 0;
-    } else if (!strcmp(k, "cheat_index_cache_ttl_sec")) {
-      g_cfg.cheat_index_cache_ttl_sec = atoi(v);
     } else if (!strcmp(k, "allow_force_enable")) {
       g_cfg.allow_force_enable = atoi(v) ? 1 : 0;
     } else if (!strcmp(k, "cheat_state_after_launch_delay_ms")) {
@@ -299,8 +286,6 @@ config_load(void) {
       g_cfg.cheat_log_candidates = atoi(v) ? 1 : 0;
     } else if (!strcmp(k, "launch_user_id")) {
       snprintf(g_cfg.launch_user_id, sizeof(g_cfg.launch_user_id), "%s", v);
-    } else if (!strcmp(k, "launch_quick_verify_ms")) {
-      g_cfg.launch_quick_verify_ms = atoi(v);
     } else if (!strcmp(k, "cheat_post_apply_watch_ms")) {
       g_cfg.cheat_post_apply_watch_ms = atoi(v);
       if (g_cfg.cheat_post_apply_watch_ms < 0) g_cfg.cheat_post_apply_watch_ms = 8000;
@@ -339,8 +324,6 @@ config_load(void) {
       snprintf(g_cfg.log_level, sizeof(g_cfg.log_level), "%s", v);
     } else if (!strcmp(k, "cheat_master_code_fixup")) {
       g_cfg.cheat_master_code_fixup = atoi(v) ? 1 : 0;
-    } else if (!strcmp(k, "cheat_codecave_fallback")) {
-      g_cfg.cheat_codecave_fallback = atoi(v) ? 1 : 0;
     } else if (!strcmp(k, "cheat_addr_cache_enabled")) {
       g_cfg.cheat_addr_cache_enabled = atoi(v) ? 1 : 0;
     } else if (!strcmp(k, "cheat_inter_mod_delay_ms")) {
@@ -414,7 +397,10 @@ void
 config_check_reload(void) {
   struct stat st;
   if (stat(CHEATRUNNER_CONFIG_PATH, &st) != 0) return;
-  if (st.st_mtime == g_cfg_mtime) return;
+  pthread_mutex_lock(&g_cfg_lock);
+  time_t last_mtime = g_cfg_mtime;
+  pthread_mutex_unlock(&g_cfg_lock);
+  if (st.st_mtime == last_mtime) return;
   cr_log("info", "config", "config file changed on disk, reloading");
   config_load();
 }

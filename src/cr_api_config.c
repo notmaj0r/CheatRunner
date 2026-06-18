@@ -16,7 +16,7 @@ handle_api_config(int fd) {
            "\"auto_download_missing_cheat\":%d,\"launch_kill_current\":%d,\"launch_kill_delay_ms\":%d,"
            "\"launch_wait_timeout_ms\":%d,\"cheat_engine\":%d,\"cheat_validate_original_bytes\":%d,"
            "\"cheat_restore_rx\":%d,\"cheat_restore_original_prot\":%d,"
-           "\"cheat_index_cache_ttl_sec\":%d,\"allow_force_enable\":%d,"
+           "\"allow_force_enable\":%d,"
            "\"cheat_state_after_launch_delay_ms\":%d,\"dev_reload_enabled\":%d,\"dev_shutdown_delay_ms\":%d,"
            "\"cheat_sources_enabled\":%d,\"cheat_remote_download_enabled\":%d,"
            "\"cheat_source_cache_ttl_seconds\":%d,\"cheat_remote_max_file_bytes\":%d,"
@@ -26,7 +26,7 @@ handle_api_config(int fd) {
            "\"allow_legacy_mc4_without_expected\":%d,\"allow_legacy_shn_without_expected\":%d,"
            "\"cheat_mc4_unverified_fallback\":\"%s\",\"cheat_shn_unverified_fallback\":\"%s\","
            "\"cheat_min_stable_ms\":%d,\"cheat_apply_cooldown_ms\":%d,"
-           "\"cheat_codecave_fallback\":%d,\"cheat_master_code_fixup\":%d,"
+           "\"cheat_master_code_fixup\":%d,"
            "\"cheat_addr_cache_enabled\":%d,\"cheat_inter_mod_delay_ms\":%d,"
            "\"fan_min_c\":%d,\"fan_max_c\":%d,"
            "\"allow_unsafe_mc4_apply\":%d,\"allow_unsafe_shn_apply\":%d,"
@@ -37,7 +37,7 @@ handle_api_config(int fd) {
            g_cfg.auto_download_missing_cheat, g_cfg.launch_kill_current, g_cfg.launch_kill_delay_ms,
            g_cfg.launch_wait_timeout_ms, g_cfg.cheat_engine, g_cfg.cheat_validate_original_bytes,
            g_cfg.cheat_restore_rx, g_cfg.cheat_restore_original_prot,
-           g_cfg.cheat_index_cache_ttl_sec, g_cfg.allow_force_enable, g_cfg.cheat_state_after_launch_delay_ms,
+           g_cfg.allow_force_enable, g_cfg.cheat_state_after_launch_delay_ms,
            g_cfg.dev_reload_enabled, g_cfg.dev_shutdown_delay_ms,
            g_cfg.cheat_sources_enabled, g_cfg.cheat_remote_download_enabled,
            g_cfg.cheat_source_cache_ttl_seconds, g_cfg.cheat_remote_max_file_bytes,
@@ -47,7 +47,7 @@ handle_api_config(int fd) {
            g_cfg.allow_legacy_mc4_without_expected, g_cfg.allow_legacy_shn_without_expected,
            g_cfg.cheat_mc4_unverified_fallback, g_cfg.cheat_shn_unverified_fallback,
            g_cfg.cheat_min_stable_ms, g_cfg.cheat_apply_cooldown_ms,
-           g_cfg.cheat_codecave_fallback, g_cfg.cheat_master_code_fixup,
+           g_cfg.cheat_master_code_fixup,
            g_cfg.cheat_addr_cache_enabled, g_cfg.cheat_inter_mod_delay_ms,
            g_cfg.fan_min_c, g_cfg.fan_max_c,
            g_cfg.allow_unsafe_mc4_apply, g_cfg.allow_unsafe_shn_apply,
@@ -89,8 +89,6 @@ handle_api_config_set(int fd, const char *query) {
     g_cfg.cheat_validate_original_bytes = atoi(value) ? 1 : 0;
   } else if (!strcmp(key, "cheat_restore_rx")) {
     g_cfg.cheat_restore_rx = atoi(value) ? 1 : 0;
-  } else if (!strcmp(key, "cheat_index_cache_ttl_sec")) {
-    g_cfg.cheat_index_cache_ttl_sec = atoi(value);
   } else if (!strcmp(key, "allow_force_enable")) {
     g_cfg.allow_force_enable = atoi(value) ? 1 : 0;
   } else if (!strcmp(key, "cheat_state_after_launch_delay_ms")) {
@@ -176,8 +174,6 @@ handle_api_config_set(int fd, const char *query) {
   } else if (!strcmp(key, "cheat_apply_cooldown_ms")) {
     int v = atoi(value);
     g_cfg.cheat_apply_cooldown_ms = (v >= 0 && v <= 10000) ? v : 500;
-  } else if (!strcmp(key, "cheat_codecave_fallback")) {
-    g_cfg.cheat_codecave_fallback = atoi(value) ? 1 : 0;
   } else if (!strcmp(key, "cheat_master_code_fixup")) {
     g_cfg.cheat_master_code_fixup = atoi(value) ? 1 : 0;
   } else if (!strcmp(key, "cheat_addr_cache_enabled")) {
@@ -232,10 +228,7 @@ handle_api_config_reset(int fd) {
   http_send_json(fd, rc == 0 ? 200 : 500, rc == 0 ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"save failed\"}");
 }
 
-/* Apply a curated bundle of related settings in one click.
- *   safe   — validation on, unsafe applies off, relative fallback (default-ish)
- *   compat — maximum compatibility: allow unverified/unsafe applies for stubborn cheats
- *   debug  — verbose logging + candidate diagnostics */
+/* Curated setting bundles: safe = validated defaults, compat = allow unsafe applies, debug = verbose logging. */
 void
 handle_api_config_preset(int fd, const char *query) {
   char name[32] = {0};
@@ -251,7 +244,6 @@ handle_api_config_preset(int fd, const char *query) {
     g_cfg.allow_unsafe_mc4_apply = 0;
     g_cfg.allow_unsafe_shn_apply = 0;
     g_cfg.cheat_address_auto_detect = 1;
-    g_cfg.cheat_codecave_fallback = 1;
     g_cfg.cheat_master_code_fixup = 1;
     g_cfg.cheat_log_candidates = 0;
     snprintf(g_cfg.cheat_mc4_unverified_fallback, sizeof(g_cfg.cheat_mc4_unverified_fallback), "%s", "relative");
@@ -264,7 +256,6 @@ handle_api_config_preset(int fd, const char *query) {
     g_cfg.allow_unsafe_mc4_apply = 1;
     g_cfg.allow_unsafe_shn_apply = 1;
     g_cfg.cheat_address_auto_detect = 1;
-    g_cfg.cheat_codecave_fallback = 1;
     g_cfg.cheat_master_code_fixup = 1;
     snprintf(g_cfg.cheat_mc4_unverified_fallback, sizeof(g_cfg.cheat_mc4_unverified_fallback), "%s", "relative");
     snprintf(g_cfg.cheat_shn_unverified_fallback, sizeof(g_cfg.cheat_shn_unverified_fallback), "%s", "relative");

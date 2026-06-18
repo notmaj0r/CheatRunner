@@ -12,6 +12,8 @@ typedef struct {
     uint64_t off;
     size_t   len;
     int      is_abs;
+    int      section;        /* per-entry "section" (dynlib handle index), 0 = none */
+    char     module_name[64]; /* per-mod "module_name", "" = eboot/main */
 } cmap_entry_t;
 
 int
@@ -46,12 +48,16 @@ conflict_map_build(const char *json_text, cheat_conflict_map_t *out) {
         if (!cJSON_IsArray(mem)) mem = cJSON_GetObjectItem(mod, "patches");
         if (!cJSON_IsArray(mem)) continue;
 
+        cJSON *mname_j = cJSON_GetObjectItem(mod, "module_name");
+        const char *module_name = (cJSON_IsString(mname_j) && mname_j->valuestring) ? mname_j->valuestring : "";
+
         cJSON *e = NULL;
         cJSON_ArrayForEach(e, mem) {
             if (entry_n[mi] >= CONFLICT_MAX_ENTRIES) break;
             cJSON *off_j = cJSON_GetObjectItem(e, "offset");
             cJSON *on_j  = cJSON_GetObjectItem(e, "on");
             cJSON *abs_j = cJSON_GetObjectItem(e, "absolute");
+            cJSON *sec_j = cJSON_GetObjectItem(e, "section");
             if (!cJSON_IsString(off_j) || !cJSON_IsString(on_j)) continue;
             uint64_t off_u = 0;
             if (parse_offset_hex_checked(off_j->valuestring, &off_u) != 0) continue;
@@ -62,15 +68,12 @@ conflict_map_build(const char *json_text, cheat_conflict_map_t *out) {
             ce->off    = off_u;
             ce->len    = on_len;
             ce->is_abs = cJSON_IsTrue(abs_j) ? 1 : 0;
+            ce->section = (cJSON_IsNumber(sec_j) && sec_j->valuedouble > 0) ? (int)sec_j->valuedouble : 0;
+            snprintf(ce->module_name, sizeof(ce->module_name), "%s", module_name);
         }
     }
 
-    /* Compute mastercode group for each mod: group_id = index of nearest preceding
-     * mastercode, or -1 for mods before the first mastercode and -2 for mastercodes
-     * themselves.  Two non-mastercode mods in different groups only conflict when
-     * they share an address AND both their mastercodes are active simultaneously —
-     * but the auto-enable logic treats them independently, so we skip cross-group
-     * pairs to avoid false-positive conflict blocks. */
+    /* group_id = index of nearest preceding mastercode (-1 before any, -2 if mastercode itself); cross-group address overlaps are skipped to avoid false-positive conflicts. */
     int mod_group[CONFLICT_MAX_MODS];
     for (int mi = 0; mi < mod_count; mi++) mod_group[mi] = -1;
     {
@@ -93,15 +96,16 @@ conflict_map_build(const char *json_text, cheat_conflict_map_t *out) {
             /* Skip: mastercode i vs one of its own dependents — they don't conflict;
              * enabling a dependent requires the mastercode to be active. */
             if (mod_group[i] == -2 && mod_group[j] == i) continue;
-            /* Skip: two non-mastercode mods from different defined groups.
-             * Their raw offsets are both eboot-relative but the auto-enable system
-             * treats them under separate mastercodes; they can be on simultaneously. */
+            /* Skip: different mastercode groups can be on simultaneously, so they don't conflict. */
             if (mod_group[i] >= 0 && mod_group[j] >= 0 && mod_group[i] != mod_group[j]) continue;
             int found = 0;
             for (int ei = 0; ei < entry_n[i] && !found; ei++) {
                 for (int ej = 0; ej < entry_n[j] && !found; ej++) {
                     /* Don't compare abs vs relative — can't resolve without base */
                     if ((*entries_p)[i][ei].is_abs != (*entries_p)[j][ej].is_abs) continue;
+                    /* Different module base — same offset, different real address. */
+                    if ((*entries_p)[i][ei].section != (*entries_p)[j][ej].section) continue;
+                    if (strcmp((*entries_p)[i][ei].module_name, (*entries_p)[j][ej].module_name) != 0) continue;
                     uint64_t a0 = (*entries_p)[i][ei].off;
                     uint64_t a1 = a0 + (uint64_t)(*entries_p)[i][ei].len;
                     uint64_t b0 = (*entries_p)[j][ej].off;

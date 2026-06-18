@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "cr_log.h"
+#include "cr_mdbg.h"
 #include "cr_memory.h"
 #include "cr_notifications.h"
 #include "cr_paths.h"
@@ -214,26 +215,24 @@ patch_restore_entry(const char *title_id, const char *entry_id, pid_t pid,
     *rec = g_patch_backups[slot];
     pthread_mutex_unlock(&g_patch_backup_lock);
 
-    /* Hold the global ptrace gate across attach→detach (blocking — this is a user
-     * action, so waiting for an in-flight apply to finish is fine). Prevents a
-     * concurrent attach from another thread tearing down this restore session. */
+    /* Block on the apply gate (fine, this is a user action) and flag g_cheat_applying for other subsystems. */
     pthread_mutex_lock(&g_cheat_apply_lock);
     g_cheat_applying = 1;
 
-    int _at = pt_attach_timed(pid, 3000);
-    if (_at < 0) {
+    /* write_process_memory_forced is mdbg-backed and needs no ptrace attach,
+     * so just confirm the process is still alive before writing. */
+    if (kill(pid, 0) != 0 && errno == ESRCH) {
         g_cheat_applying = 0;
         pthread_mutex_unlock(&g_cheat_apply_lock);
         free(rec);
         if (result) {
             snprintf(result->error,   sizeof(result->error),   "attach_failed");
-            snprintf(result->message, sizeof(result->message), "pt_attach failed — game may have exited");
+            snprintf(result->message, sizeof(result->message), "game has exited");
         }
         return -1;
     }
 
     int errors = 0;
-    pt_batch_begin();   /* elevate once for the whole restore loop */
     for (int i = 0; i < rec->line_count; i++) {
         int wrc = write_process_memory_forced(pid, (intptr_t)rec->lines[i].address,
                                               rec->lines[i].bytes, rec->lines[i].len);
@@ -243,8 +242,6 @@ patch_restore_entry(const char *title_id, const char *entry_id, pid_t pid,
             errors++;
         }
     }
-    pt_batch_end();
-    pt_detach(pid, 0);
     g_cheat_applying = 0;
     pthread_mutex_unlock(&g_cheat_apply_lock);
 
@@ -303,24 +300,11 @@ patch_restore_all_for_pid(pid_t pid, const char *title_id) {
            "game_stop: restoring %d applied patch(es) title=%s pid=%d",
            count, title_id ? title_id : "?", (int)pid);
 
-    /* Take the global ptrace gate so we never attach a pid another thread is
-     * already tracing. trylock (not blocking): the monitor poll must not stall,
-     * and a non-recursive blocking lock here could deadlock if ever reached while
-     * the caller already holds it. If busy, defer — backups stay for a later tick. */
+    /* trylock, not blocking: the monitor poll must not stall; if busy, defer to a later tick. */
     if (pthread_mutex_trylock(&g_cheat_apply_lock) != 0) {
         cr_log("info", "patches",
-               "game_stop: ptrace busy, deferring restore of %d patch(es) pid=%d",
+               "game_stop: apply busy, deferring restore of %d patch(es) pid=%d",
                count, (int)pid);
-        return;
-    }
-
-    int _at = pt_attach_timed(pid, 2000);
-    if (_at < 0) {
-        cr_log("warn", "patches",
-               "game_stop: pt_attach failed for pid=%d — %d patch(es) not restored",
-               (int)pid, count);
-        patch_clear_backups_for_pid(pid);
-        pthread_mutex_unlock(&g_cheat_apply_lock);
         return;
     }
 
@@ -333,7 +317,6 @@ patch_restore_all_for_pid(pid_t pid, const char *title_id) {
             snprintf(entry_ids[snap_n++], PATCH_ENTRY_ID_LEN, "%s", g_patch_backups[i].entry_id);
     pthread_mutex_unlock(&g_patch_backup_lock);
 
-    pt_batch_begin();   /* elevate once across all restore writes */
     for (int ei = 0; ei < snap_n; ei++) {
         pthread_mutex_lock(&g_patch_backup_lock);
         int slot = -1;
@@ -361,8 +344,6 @@ patch_restore_all_for_pid(pid_t pid, const char *title_id) {
         free(rec);
     }
 
-    pt_batch_end();
-    pt_detach(pid, 0);
     patch_clear_backups_for_pid(pid);
     pthread_mutex_unlock(&g_cheat_apply_lock);
 }
@@ -795,6 +776,7 @@ parse_hex_bytes(const char *s, uint8_t *out, size_t *out_len, size_t max) {
         size_t hex_digits = strlen(s + 2);
         size_t nbytes = (hex_digits + 1) / 2;
         if (nbytes == 0) nbytes = 1;
+        if (nbytes > 8) nbytes = 8; /* v only holds 64 bits; shifting by >=64 is UB */
         if (nbytes > max) return -1;
         for (size_t i = 0; i < nbytes; i++)
             out[i] = (uint8_t)(v >> (8 * i));
@@ -1098,8 +1080,13 @@ scan_for_pattern(pid_t pid, intptr_t scan_start, size_t scan_size,
         if (scanned + read_sz > scan_size) read_sz = scan_size - scanned;
 
         intptr_t chunk_addr = scan_start + (intptr_t)scanned;
-        int rrc = pt_copyout(pid, chunk_addr, buf, read_sz);
-        if (rrc < 0) { scanned += want; continue; }
+        /* Stop at the first unreadable chunk instead of skipping past it — that's
+         * the edge of the mapped module, not a gap to scan through. Continuing
+         * blindly toward the MASK_SCAN_LIMIT ceiling risks hitting unmapped/MMIO
+         * memory, which has caused a kernel panic. */
+        if (!ADDR_IN_USER_RANGE(chunk_addr)) break;
+        int rrc = mdbg_io_copyout(pid, chunk_addr, buf, read_sz);
+        if (rrc < 0) break;
 
         size_t search_len = (read_sz >= pat_len) ? (read_sz - pat_len + 1) : 0;
         for (size_t i = 0; i < search_len; i++) {
@@ -1177,27 +1164,21 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
         return -1;
     }
 
-    /* Serialize against cheat-applies and dashboard ptrace reads on the SAME global
-     * gate the cheat path uses. Two threads attaching the same pid is the classic
-     * failure where the second pt_attach fails and its cleanup PT_DETACHes the first
-     * thread's session mid-write — observed as mid-patch mprotect/copyout failures.
-     * g_cheat_applying makes the dashboard poll back off while we hold the game. */
+    /* Same global gate as the cheat path, plus g_cheat_applying so the dashboard poll backs off. */
     pthread_mutex_lock(&g_cheat_apply_lock);
     g_cheat_applying = 1;
 
-    int _at = pt_attach_timed(pid, 5000);
-    if (_at < 0) {
+    if (kill(pid, 0) != 0 && errno == ESRCH) {
         g_cheat_applying = 0;
         pthread_mutex_unlock(&g_cheat_apply_lock);
         if (result) { snprintf(result->error, 64, "attach_failed");
-                      snprintf(result->message, 256, "pt_attach failed"); }
+                      snprintf(result->message, 256, "game has exited"); }
         return -1;
     }
 
     /* Heap-allocate — 64 × 280 bytes = 17.5 KB would overflow the thread stack. */
     cr_patch_backup_t *backups = calloc(PATCH_MAX_LINES, sizeof(*backups));
     if (!backups) {
-        pt_detach(pid, 0);
         g_cheat_applying = 0;
         pthread_mutex_unlock(&g_cheat_apply_lock);
         if (result) { snprintf(result->error, 64, "oom");
@@ -1210,12 +1191,6 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
     int verify_fails  = 0;
     char err_msg[256] = {0};
     char err_code[64] = {0};
-
-    /* Elevate ucred once for the whole write+verify loop. A large patch (100+
-     * lines) does thousands of ptrace ops; the per-call credential swap would
-     * otherwise dominate and exceed the request timeout. Safe because we hold the
-     * global ptrace gate, so no other thread does ptrace while this batch is open. */
-    pt_batch_begin();
 
     for (int i = 0; i < entry->line_count; i++) {
         const patch_line_t *ln = &entry->lines[i];
@@ -1241,7 +1216,7 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
                 char val_hex[PATCH_LINE_MAX_BYTES * 3 + 4] = {0};
                 uint8_t pre[PATCH_MASK_MAX_BYTES];
                 size_t rd = (ln->pattern_len <= PATCH_MASK_MAX_BYTES) ? ln->pattern_len : PATCH_MASK_MAX_BYTES;
-                if (pt_copyout(pid, write_addr, pre, rd) >= 0) {
+                if (mdbg_io_copyout(pid, write_addr, pre, rd) >= 0) {
                     size_t pos = 0;
                     for (size_t b = 0; b < rd && pos + 4 < sizeof(pre_hex); b++)
                         pos += (size_t)snprintf(pre_hex + pos, sizeof(pre_hex) - pos, "%02x ", pre[b]);
@@ -1271,7 +1246,7 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
 
         /* Save backup before writing */
         if (ln->value_len <= PATCH_LINE_MAX_BYTES) {
-            int rrc = pt_copyout(pid, write_addr, backups[backup_count].old_bytes, ln->value_len);
+            int rrc = mdbg_io_copyout(pid, write_addr, backups[backup_count].old_bytes, ln->value_len);
             if (rrc < 0) {
                 snprintf(err_code, sizeof(err_code), "backup_read_failed");
                 snprintf(err_msg,  sizeof(err_msg),
@@ -1300,7 +1275,7 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
             }
             if (ln->value_len <= PATCH_LINE_MAX_BYTES) {
                 uint8_t vbuf[PATCH_LINE_MAX_BYTES];
-                if (pt_copyout(pid, write_addr, vbuf, ln->value_len) >= 0 &&
+                if (mdbg_io_copyout(pid, write_addr, vbuf, ln->value_len) >= 0 &&
                     memcmp(vbuf, ln->value, ln->value_len) != 0) {
                     cr_log("warn", "patches", "mask_verify_mismatch addr=0x%lx len=%zu",
                            (long)write_addr, ln->value_len);
@@ -1326,7 +1301,7 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
             /* Readback verify (write_process_memory_forced has no internal verify) */
             if (ln->value_len <= PATCH_LINE_MAX_BYTES) {
                 uint8_t vbuf[PATCH_LINE_MAX_BYTES];
-                if (pt_copyout(pid, write_addr, vbuf, ln->value_len) >= 0 &&
+                if (mdbg_io_copyout(pid, write_addr, vbuf, ln->value_len) >= 0 &&
                     memcmp(vbuf, ln->value, ln->value_len) != 0) {
                     char exp_h[52] = {0}, got_h[52] = {0};
                     size_t hn = ln->value_len < 16 ? ln->value_len : 16;
@@ -1358,8 +1333,6 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
                title_id, entry->name, backup_count, rollback_errors);
     }
 
-    pt_batch_end();
-    pt_detach(pid, 0);
     g_cheat_applying = 0;
     pthread_mutex_unlock(&g_cheat_apply_lock);
 

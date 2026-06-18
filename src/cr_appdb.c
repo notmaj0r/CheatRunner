@@ -17,8 +17,6 @@
 #include "third_party/sqlite3.h"
 #endif
 
-#define CR_APPDB_MAX_GAMES 1024
-
 static int
 find_game_index(game_entry_t *entries, size_t count, const char *title_id) {
   for (size_t i = 0; i < count; i++) {
@@ -132,10 +130,7 @@ collect_games(game_entry_t *entries, size_t *count) {
 }
 
 #if CHEATRUNNER_HAVE_SQLITE_APPDB
-/* SQLite is compiled with SQLITE_THREADSAFE=0 — no internal locking at all.
- * Concurrent sqlite3_* calls from multiple threads (even on separate connections)
- * corrupt shared library state and crash. All SQLite entry points must hold
- * this mutex. */
+/* SQLite is built with SQLITE_THREADSAFE=0; all entry points must hold this or concurrent calls corrupt state. */
 static pthread_mutex_t g_sqlite_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int

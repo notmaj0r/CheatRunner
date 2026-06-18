@@ -29,10 +29,10 @@ static const int AVATAR_SIZES[] = {64, 128, 260, 440};
 
 static void
 send_obj(int fd, int status, cJSON *root) {
-  if (!root) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}"); return; }
+  if (!root) { http_send_oom(fd); return; }
   char *txt = cJSON_PrintUnformatted(root);
   cJSON_Delete(root);
-  if (!txt) { http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}"); return; }
+  if (!txt) { http_send_oom(fd); return; }
   http_send_json(fd, status, txt);
   free(txt);
 }
@@ -407,6 +407,12 @@ avatar_build_request(int fd, const char *query, const char *body, size_t body_le
     snprintf(err, sizeof(err), "decode failed: %s", stbi_failure_reason() ? stbi_failure_reason() : "bad image");
     if (rgba) stbi_image_free(rgba);
     send_err(fd, 400, err);
+    return;
+  }
+  /* Reject absurd source dimensions before the w*h*4 resize allocations. */
+  if (w > 4096 || h > 4096) {
+    stbi_image_free(rgba);
+    send_err(fd, 400, "image too large (max 4096x4096)");
     return;
   }
 

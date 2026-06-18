@@ -40,6 +40,6 @@ cr_api_dev_handle(int fd, const char *method, const char *path,
     handle_api_dev_open_browser(fd, method, query);
     return 1;
   }
-  /* /api/dev/shutdown is handled directly in http_route (needs token_header + client_ip) */
+  /* /api/dev/shutdown is handled directly in http_route (needs client_ip) */
   return 0;
 }

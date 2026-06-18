@@ -18,7 +18,6 @@ typedef struct cheatrunner_config {
   int cheat_validate_original_bytes;
   int cheat_restore_rx;          /* legacy/deprecated: use cheat_restore_original_prot instead */
   int cheat_restore_original_prot;
-  int cheat_index_cache_ttl_sec;
   int allow_force_enable;
   int cheat_state_after_launch_delay_ms;
   int launch_post_timeout_grace_ms;
@@ -36,7 +35,6 @@ typedef struct cheatrunner_config {
   char cheat_mc4_unverified_fallback[16]; /* block|legacy|absolute|relative */
   char cheat_shn_unverified_fallback[16];
   int cheat_log_candidates;
-  int launch_quick_verify_ms;
   int cheat_post_apply_watch_ms;
   int cheat_mark_crash_suspect;
   int cheat_apply_one_at_a_time;
@@ -54,7 +52,6 @@ typedef struct cheatrunner_config {
   int appdb_debug_names;
   char log_level[16];
   int cheat_master_code_fixup;
-  int cheat_codecave_fallback;
   int cheat_addr_cache_enabled;
   int cheat_inter_mod_delay_ms;
   int fan_min_c;   /* lower bound for the fan-on threshold slider (default 30) */

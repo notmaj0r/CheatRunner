@@ -146,15 +146,33 @@ http_send_json(int fd, int status, const char *body) {
   }
 }
 
+/* Grows *buf (cap+1 bytes allocated) so cap >= need, capped at MAX_REQ_SIZE. */
+static int
+http_grow_buf(char **buf, size_t *cap, size_t need) {
+  if (need <= *cap) return 0;
+  size_t new_cap = *cap;
+  while (new_cap < need) {
+    new_cap *= 2;
+    if (new_cap >= MAX_REQ_SIZE) { new_cap = MAX_REQ_SIZE; break; }
+  }
+  char *nb = realloc(*buf, new_cap + 1);
+  if (!nb) return -1;
+  *buf = nb;
+  *cap = new_cap;
+  return 0;
+}
+
 static void
 http_handle_client(int fd, const char *client_ip) {
-  char *req = malloc(MAX_REQ_SIZE + 1);
+  /* Most requests (polling, toggles) are a few KB — start small and grow only
+   * for the rare large upload, instead of malloc'ing MAX_REQ_SIZE every time. */
+  size_t cap = 65536;
+  char *req = malloc(cap + 1);
   if (!req) {
     http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
     return;
   }
   size_t off = 0;
-  char *body_ptr = NULL;
   size_t body_len = 0;
 
   struct timeval tv;
@@ -167,7 +185,12 @@ http_handle_client(int fd, const char *client_ip) {
     if (off >= MAX_REQ_SIZE) {
       break;
     }
-    int n = recv(fd, req + off, MAX_REQ_SIZE - off, 0);
+    if (off >= cap && http_grow_buf(&req, &cap, off + 1) != 0) {
+      http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
+      free(req);
+      return;
+    }
+    int n = recv(fd, req + off, cap - off, 0);
     if (n <= 0) {
       if (n < 0 && errno == EINTR) {
         continue;
@@ -203,12 +226,18 @@ http_handle_client(int fd, const char *client_ip) {
 
   size_t header_bytes = (size_t)(headers_end - req);
   req[header_bytes] = '\0';
-  body_ptr = headers_end + sep_len;
   size_t already_body = off > (header_bytes + sep_len) ? (off - (header_bytes + sep_len)) : 0;
   size_t content_len = parse_content_length_header(req);
   size_t used = header_bytes + sep_len;
   if (used >= MAX_REQ_SIZE || content_len > MAX_REQ_SIZE - used - 1) {
     http_send_json(fd, 413, "{\"ok\":false,\"error\":\"payload_too_large\"}");
+    free(req);
+    return;
+  }
+  /* Headers parsed — grow straight to the full known size up front, since
+   * pointers taken before a realloc would otherwise dangle. */
+  if (http_grow_buf(&req, &cap, used + content_len) != 0) {
+    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
     free(req);
     return;
   }
@@ -218,7 +247,7 @@ http_handle_client(int fd, const char *client_ip) {
       free(req);
       return;
     }
-    int n = recv(fd, req + off, MAX_REQ_SIZE - off, 0);
+    int n = recv(fd, req + off, cap - off, 0);
     if (n <= 0) {
       if (n < 0 && errno == EINTR) {
         continue;
@@ -234,29 +263,16 @@ http_handle_client(int fd, const char *client_ip) {
     return;
   }
   body_len = content_len;
+  char *body_ptr = req + header_bytes + sep_len;
   body_ptr[body_len] = '\0';
 
   char method[8] = {0};
   char target[1024] = {0};
   char version[16] = {0};
-  char token_header[128] = {0};
   if (sscanf(req, "%7s %1023s %15s", method, target, version) != 3) {
     http_send_json(fd, 400, "{\"ok\":false,\"error\":\"bad request\"}");
     free(req);
     return;
-  }
-  const char *th = strstr(req, "\nX-CheatRunner-Token:");
-  if (th) {
-    th += strlen("\nX-CheatRunner-Token:");
-    while (*th == ' ' || *th == '\t') {
-      th++;
-    }
-    size_t i = 0;
-    while (*th && *th != '\r' && *th != '\n' && i + 1 < sizeof(token_header)) {
-      token_header[i++] = *th++;
-    }
-    token_header[i] = '\0';
-    str_trim(token_header);
   }
   char *query = strchr(target, '?');
   if (query) {
@@ -265,7 +281,7 @@ http_handle_client(int fd, const char *client_ip) {
   } else {
     query = "";
   }
-  http_route(fd, method, target, query, token_header, client_ip ? client_ip : "unknown",
+  http_route(fd, method, target, query, client_ip ? client_ip : "unknown",
              body_ptr ? body_ptr : "", body_len);
   free(req);
 }
@@ -302,11 +318,7 @@ http_server_thread(void *arg) {
 
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR,  &opt, sizeof(opt));
-    /* SO_REUSEPORT lets a new instance bind immediately even if the old
-     * process is still alive (e.g. stuck in uninterruptible kernel sleep
-     * after SIGKILL).  The old listener dies within milliseconds once it
-     * wakes from sleep; until then the kernel distributes new connections
-     * between both sockets — harmless given the overlap is extremely brief. */
+    /* SO_REUSEPORT lets a new instance bind immediately even if a SIGKILL'd old process is still alive in kernel sleep. */
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -318,11 +330,7 @@ http_server_thread(void *arg) {
       int be = errno;
       close(listen_fd);
       bind_fails++;
-      /* EADDRINUSE (FreeBSD errno 48) almost always means a previous CheatRunner
-       * is still listening on this port (SO_REUSEADDR only reclaims dead TIME_WAIT
-       * sockets, not a live listener). Surface that clearly once, then back off so
-       * the log/toast isn't flooded — but keep retrying so we recover on our own if
-       * the port frees up (e.g. the old instance finally exits). */
+      /* EADDRINUSE almost always means a previous CheatRunner still holds the port (SO_REUSEADDR can't reclaim a live listener); warn once, then keep retrying. */
       if (bind_fails <= 5) {
         log_msg("[HTTP] bind() failed on %d: %d", http_port, be);
       }
@@ -356,10 +364,7 @@ http_server_thread(void *arg) {
     {
       char ip[64];
       local_ip(ip, sizeof(ip));
-      /* After a socket reopen (e.g. ECONNABORTED when a game exits), the
-       * network interface may reset briefly and local_ip() transiently
-       * returns "127.0.0.1".  Keep the last known real LAN address so that
-       * dashboard QR/URL links remain valid. */
+      /* local_ip() can transiently return 127.0.0.1 after a socket reopen; keep the last real LAN address for dashboard links. */
       if (strcmp(ip, "127.0.0.1") != 0)
         snprintf(g_listen_ip, sizeof(g_listen_ip), "%s", ip);
       log_msg("Listening on: %s:%d", g_listen_ip, http_port);

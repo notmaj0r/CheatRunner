@@ -39,17 +39,15 @@ int pt_setregs(pid_t pid, const struct reg *r);
 int pt_copyin(pid_t pid, const void* buf, intptr_t addr, size_t len);
 int pt_copyout(pid_t pid, intptr_t addr, void* buf, size_t len);
 
-/* Batch elevation: each ptrace syscall normally raises this process's ucred and
- * restores it (≈4 kernel credential ops per call). For bulk operations (e.g. a
- * 100+ line patch) that overhead dominates and can exceed the request timeout.
- * pt_batch_begin() raises the credentials ONCE and holds the ucred lock; every
- * pt_* call on the same thread until pt_batch_end() then skips the per-call swap.
- * The CALLER MUST serialize ptrace (hold the global ptrace gate) so no other
- * thread does ptrace while a batch is open. begin/end nest via an internal depth
- * counter and MUST be balanced. Returns 0 on success, -1 if elevation failed
- * (calls still work, just at per-call cost). */
+/* Raises ucred once for a run of pt_* calls instead of per-call (cheap for bulk
+ * patches). Caller must hold the ptrace gate; begin/end must balance. */
 int  pt_batch_begin(void);
 void pt_batch_end(void);
+
+/* mdbg_copyin/copyout have the same ucred race as ptrace — cr_mdbg.c holds this
+ * lock around them. Don't call while pt_batch_begin() is open (same mutex, deadlocks). */
+void pt_ucred_lock(void);
+void pt_ucred_unlock(void);
 
 int pt_setchar(pid_t pid, intptr_t addr, char val);
 int pt_setshort(pid_t pid, intptr_t addr, short val);

@@ -99,7 +99,7 @@ handle_launch(int fd, const char *query) {
 
   launch_worker_request_t *req = malloc(sizeof(*req));
   if (!req) {
-    http_send_json(fd, 500, "{\"ok\":false,\"error\":\"alloc\"}");
+    http_send_oom(fd);
     return;
   }
   snprintf(req->title_id, sizeof(req->title_id), "%s", title_id);

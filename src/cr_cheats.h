@@ -110,11 +110,7 @@ extern last_game_exit_t g_last_game_exit;
 extern pthread_mutex_t g_last_apply_lock;
 extern last_apply_rec_t g_last_apply_rec;
 extern _Atomic int g_cheat_applying;
-/* Global ptrace-session gate. Held across the whole attach→write→detach window by
- * the cheat-apply path; the patch-apply and patch-restore paths take it too so no
- * two threads ever hold the game pid under ptrace at once (a second pt_attach on an
- * already-traced pid fails and its cleanup PT_DETACHes the first session). Dashboard
- * read paths back off on g_cheat_applying, which every writer sets while holding it. */
+/* Held by cheat-apply/patch-apply/patch-restore so only one runs at a time. */
 extern pthread_mutex_t g_cheat_apply_lock;
 extern volatile uint64_t g_last_apply_at_ms;
 extern volatile uint64_t g_post_apply_guard_until_ms;

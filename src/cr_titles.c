@@ -370,10 +370,7 @@ read_param_value_from_dir(const char *dir, const char *key, char *out, size_t ou
   return -1;
 }
 
-/* Scan appmeta directories for a content entry matching title_id.
- * Content IDs embed the title ID: e.g. UP9000-CUSA42556_00-HASH.
- * From the content ID we derive the sandbox mount: /mnt/sandbox/{contentId}_000/.
- * Returns 0 and fills *out on success, -1 on failure. */
+/* Finds the content ID matching title_id (e.g. UP9000-CUSA42556_00-HASH) to derive the sandbox mount path. */
 static int
 appmeta_scan_for_title(const char *title_id, const char *key, char *out, size_t out_size) {
   static const char *const bases[] = {

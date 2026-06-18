@@ -1,19 +1,18 @@
 #ifndef CR_API_INTERNAL_H
 #define CR_API_INTERNAL_H
 
-/*
- * Internal declarations shared between cr_api.c and its split modules.
- * All handler functions are defined in cr_api.c and declared here so
- * the module routing files can call them.
- */
+/* Handlers live in cr_api.c; declared here so the split routing modules can call them. */
 
 #include <stddef.h>
 #include <stdint.h>
 
 /* ---- HTTP send helpers (defined in cr_api.c) ---- */
 void http_send_json(int fd, int status, const char *body);
+void http_send_oom(int fd);
 void http_send_response(int fd, int status, const char *content_type,
                         const uint8_t *body, size_t body_len);
+void http_send_response_cached(int fd, int status, const char *content_type,
+                               const uint8_t *body, size_t body_len);
 int  query_value(const char *query, const char *key, char *out, size_t out_size);
 
 /* ---- /api/logs ---- */
@@ -85,7 +84,7 @@ void handle_api_dev_diag(int fd);
 void handle_api_dev_open_browser(int fd, const char *method, const char *query);
 void handle_api_dev_memtest(int fd);
 void handle_api_dev_shutdown(int fd, const char *method, const char *query,
-                             const char *token_header, const char *client_ip);
+                             const char *client_ip);
 void handle_api_user_context(int fd);
 void handle_api_diag_title(int fd, const char *query);
 

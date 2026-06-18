@@ -131,13 +131,12 @@ tile_autoinstall_thread(void *arg) {
   notify("CheatRunner: installing PKG...");
   cr_log("info", "tile_pkg", "tile not yet installed — starting install");
 
-  /* Short pause: give SceShellCore's installer queue a moment to be ready.
-   * 3 s is enough when CheatRunner is loaded from a running loader (elf-arsenal,
-   * goldhen, etc.); the full 30 s elf-arsenal uses is only needed on a cold
-   * first-boot before any other payload has warmed up the system. */
+  /* 3s lets SceShellCore's installer queue settle; only a cold first-boot needs elf-arsenal's full 30s. */
   sleep(3);
 
-  jb_escalate_pid(getpid());
+  if (jb_escalate_pid(getpid()) != 0) {
+    cr_log("warn", "tile_pkg", "jb_escalate_pid failed; PKG install may fail");
+  }
 
   /* Write the embedded PKG bytes to disk. */
   cr_log("info", "tile_pkg", "writing %s (%zu bytes)",
