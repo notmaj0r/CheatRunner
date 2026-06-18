@@ -1,8 +1,104 @@
 # CheatRunner — Changelog
 
-## v0.13
+## v0.14
 
 _In development._
+
+### Home Screen — PKG Moved to Media Tab
+
+- **CheatRunner's home-screen tile now installs into the Media Players row instead of the Games library.** Confirmed by directly comparing PS5's own `/system_data/priv/mms/app.db` and `appinfo.db` between YouTube (a known Media-tab app) and two real games: the fields that differ are `applicationCategoryType` (`65536`/`0x10000` for Media vs `0` for Games) and `displayLocation` (`188` vs `138`). Both are now set in `pkg-source/sce_sys/param.json` and mirrored into `pkg-source/build_sfo.py`'s hand-built SFO. Verified by rebuilding the PKG through the real `prospero-pub-cmd` publishing tool with no new errors/warnings.
+- `APP_TYPE` (`5` for YouTube vs `1` for games) and `HUBAPP_URI` (`psmediahub:main?titleId=…` vs `pshome:gamehub?titleId=…`) also differ in the system record but were left unchanged — no confirmed way to set them through the official `param.json` schema, and they may simply be derived by the system once `applicationCategoryType` is set. Worth re-checking after install if the tile doesn't land in Media as expected.
+- **Follow-up `param.json` audit, same YouTube-diff method:** `contentBadgeType` changed from `1` ("Game") to `2` ("Other") — was a leftover from before the Media-tab move. Locale key `"zh-Hans-CN"` corrected to `"zh-Hans"` — not a valid PS5 locale identifier, so the Chinese title was silently never matching and falling back to `en-US`. Added `applicationDrmType: "free"` — found via `prospero-pub-cmd` itself warning "Application DRM Type not found, the default value applied" during a real rebuild, not the wiki. `ageLevel` was deliberately left unset — spec-listed as required but not functionally needed, and there's no non-speculative age value for a homebrew utility.
+
+### Dashboard — AppCache Version Bump
+
+- **Bumped the `/cache.appcache` manifest comment from `v0.14` to `v0.14-BETA1`.** All of v0.14's dashboard HTML/CSS/JS changes (Bluesky button, PS5 perf fixes, etc.) were invisible on any PS5 that had already loaded the dashboard once under the unchanged `v0.14` manifest — HTML5 AppCache only re-fetches `/`, `/dashboard.css`, `/dashboard.js`, `/CheatRunner.png` when the manifest file's *byte content* changes, and only the version comment had been changing this whole time it wasn't bumped. Bump this comment on every release/iteration that touches the dashboard, not just on version number changes — already noted as a requirement in the original AppCache changelog entry above, but easy to forget mid-development.
+- **Bumping the manifest alone wasn't enough — added the missing AppCache update handler.** Even with the manifest comment changed, the bump still didn't show up on PS5: HTML5 AppCache downloads an updated cache *silently in the background* and never displays it unless the page's own JS listens for the `applicationCache` `updateready` event and calls `swapCache()` + reloads. This project had zero such handling anywhere, so updates were detected but never surfaced — the user could reload indefinitely and keep seeing the old page. Added a small handler at the top of `dashboard_js.inc` (right after the `isPS5` check) that calls `swapCache()` and `window.location.reload()` as soon as `updateready` fires (or immediately if the status is already `UPDATEREADY` when the script runs). This is what was actually blocking the Bluesky button and the PS5 perf CSS fixes from ever appearing — the manifest bump was necessary but not sufficient.
+
+### Dashboard — PS5 Browser Performance
+
+- **Removed Google Fonts.** The dashboard `<head>` previously loaded three typefaces (Inter, Space Grotesk, JetBrains Mono) from `fonts.googleapis.com` / `fonts.gstatic.com` via a blocking `<link rel="stylesheet">`. On PS5 — where the browser has no JIT and no GPU compositing — this triggered external DNS + TCP + HTTP round-trips that blocked first paint for up to 2 seconds depending on network conditions. All three `<link>` tags removed; `--cr-font-base`, `--cr-font-display`, and `--cr-font-mono` CSS variables now resolve to native system-ui stacks (`system-ui / -apple-system / BlinkMacSystemFont` and `ui-monospace`), which the PS5 browser serves instantly from its built-in font cache.
+
+- **HTML5 AppCache for instant repeat loads.** The `<html>` element now carries `manifest="/cache.appcache"`. A new `/cache.appcache` route serves a `text/cache-manifest` document that lists `/`, `/dashboard.css`, `/dashboard.js`, and `/CheatRunner.png` in the `CACHE` section with `NETWORK: *` to pass all API calls through to the daemon. After the first page load the PS5 browser serves the entire dashboard from its AppCache — zero HTTP requests to the daemon on every subsequent open, making the UI appear near-instantly. Cache is invalidated by bumping the version comment in the manifest; that comment is updated each release.
+
+- **HTTP caching for static assets.** `dashboard.css` and `dashboard.js` are now served with `Cache-Control: public, max-age=3600` (previously `no-cache`). A dedicated `http_send_response_cached()` helper handles this path; HTML and all API responses remain `no-cache`.
+
+- **`backdrop-filter` removed on PS5.** A `isPS5` flag is set at JS parse time (`/PlayStation/i.test(navigator.userAgent)`) and adds class `ps5` to `<html>`. The Settings overlay, Support modal, and Crop overlay all used `backdrop-filter: blur(6px)`, which on PS5's software-rendered WebKit requires compositing every pixel behind the overlay as a CPU bitmap before blurring — visibly lagging the overlay open. The `.ps5` CSS block replaces blur with `background: rgba(0,0,0,.92)` on all three overlays at zero compositing cost.
+
+- **Decorative background layers hidden on PS5.** `.cr-command-bg`, `.cr-scan-grid`, and `.cr-circuit-lines` are three `position: fixed` full-viewport layers (radial gradients, mask-image fades, repeating diagonal lines) that trigger three full-viewport software paint passes at load. On a TV-connected console the effect is imperceptible; the `.ps5` block hides all three with `display: none`.
+
+- **`crCheatGlow` and `crLivePulse` converted to compositor-only animations.** Both animations previously mutated `box-shadow` on every frame, forcing a full repaint on every cycle — on PS5 this caused periodic CPU stalls proportional to the number of visible tiles with active cheats. `crLivePulse` (running-game pill dot) now animates `opacity` only (`will-change: opacity`). `crCheatGlow` moves to an `::after` pseudo-element whose `opacity` pulses between 0.35 and 1 — the tile itself carries a static `box-shadow`; the visual pulsing comes from compositor-handled opacity with zero repaints. On PS5 both animations are disabled entirely via the `.ps5` block (static indicators remain visible).
+
+- **`clip-path` stripped from entry animations.** `crPanelDeploy`, `crToastSnap`, and `crToastIn` animated `clip-path` alongside `transform`/`opacity`. PS5's older WebKit may software-composite `clip-path` changes. All three keyframe definitions are now `opacity` + `transform` only — GPU-safe on all targets, and visually indistinguishable at the short durations used (0.22–0.24 s).
+
+- **Tile stagger animation disabled on PS5.** The game grid entrance animation staggers each tile's delay by `calc(var(--ti) * 26ms)`. With 50+ games this schedules 50+ separate composite tasks spread over ~1.3 s. On PS5, `isPS5` suppresses the `--ti` index (all tiles use `animation-delay: 0ms`), collapsing the stagger to a single simultaneous entrance.
+
+- **Game tile hover no longer transitions `box-shadow`/`border-color`.** `.cr-game-tile` previously transitioned `transform`, `border-color`, `box-shadow`, and `border-left-color` together on hover — on PS5's software-rendered WebKit, animating `box-shadow` forces a full repaint of every hovered tile, the same class of cost as the already-fixed `crCheatGlow`. The `.ps5` block now restricts the tile's transition to `transform` only.
+
+- **`crCardPulse` (launching-tile pulse) disabled on PS5.** This animation runs continuously (1.1s loop) on any tile mid-launch, animating `box-shadow` and `border-left-color` every frame — a full-repaint loop with no compositor to offload it to. Disabled entirely via `.ps5 .cr-game-tile.is-launching { animation: none !important; }`.
+
+- **`crShimmer` (loading-skeleton shimmer) disabled on PS5.** Up to 8 skeleton tiles re-rasterize a gradient sweep every frame during the initial game-list load. Disabled via `.ps5 .cr-skel-tile::after { animation: none !important; }`.
+
+- **`cr-rgb-cycle` (Support modal supporter-name color cycle) re-enabled on PS5.** Was briefly disabled via `.ps5 .cr-supporter-name { animation: none !important; }` (animates `color` + `text-shadow` on a 3-second loop, only 3 elements, only while the rarely-opened Support modal is up) — re-enabled by request, since the cost is low and the visual effect is wanted on PS5 too.
+
+- **Game tile background flattened to a solid color on PS5.** `.cr-game-tile` used a 2-stop `linear-gradient` background, rasterized independently per tile by the software renderer — 50+ separate gradient fills across a full grid. `.ps5` now uses a flat `background: var(--cr-panel)` instead.
+
+- These five fixes extend the same `.ps5` override block used by the original PS5 performance pass — `prefers-reduced-motion: reduce` already disabled transitions/animations on several of these same elements (`.cr-game-tile`, `.cr-skel-tile::after`), but that media feature isn't set by the PS5 browser, so it never applied there until now.
+
+- **Two more missed animations disabled on PS5**, found by auditing every `@keyframes` against the existing `.ps5` override block: `crSwitchScan` (the sweep on a cheat switch's `.is-pending`/`.is-applying` state) was running on every single cheat toggle, for the full duration of the apply request — exactly the window you want the PS5's CPU most free. `crVertScan` (launch-overlay sweep) was running during every game launch. Both now disabled via `.ps5`.
+
+- **Tile selection no longer rebuilds the entire game grid.** Clicking a tile to select it only ever needed to move the `.active` CSS class — but the click handler called `renderGames()`, a full `innerHTML` rebuild that destroys and recreates every tile's `<img>` cover element (forcing a re-decode of every visible game's icon on every click). The handler now toggles `.active` directly on the previously/newly selected tile instead. (Favorite-toggle still does a full rebuild for now — it can change which tiles are visible/sorted depending on the active filter, so it needs more care before the same optimization is safe there. Game icons are also still served `Cache-Control: no-cache` and the HTTP server has no keep-alive at all — both identified as bigger remaining levers, not yet addressed.)
+
+### Memory Engine — mdbg I/O Migration (Game Freeze Fix)
+
+- **Cheat toggles and patch applies no longer freeze the game.** The read/write engine previously used ptrace (`pt_copyin`/`pt_copyout`) exclusively, which requires `PT_ATTACH`ing the target process — stopping it — for the entire duration of every apply, restore, or dashboard state-check call. Two threads attaching the same pid concurrently (e.g. a dashboard poll racing a cheat apply) was a known failure mode, observed as mid-patch `mprotect`/`copyout` corruption. Confirmed fixed on real hardware: games stay running through cheat applies and patch operations.
+- **New `cr_mdbg.c`/`cr_mdbg.h` module.** Plain memory reads/writes (`read_process_memory`, `write_process_memory_forced`, the mask-pattern scanner, patch backup/verify) now go through `mdbg_copyin`/`mdbg_copyout`, which do not require the target to be attached or stopped — the game keeps running while its memory is read or written.
+- **Firmware 8.20+ write fallback.** Sony's `mdbg_copyin` (writes only — reads are unaffected) silently stops working on PS5 firmware 8.20+. `cr_mdbg.c` detects this via `kernel_get_fw_version()` and falls back to a manual CR3/page-table walk plus a direct-map kernel write, ported from the `ps-patch-system` project's `proc_rw.c` (credit: idlesauce).
+- **Removed the blanket attach/detach wrapping** from 8 call sites across `cr_cheats.c`, `cr_patch_parser.c`, and `cr_api.c` (cheat apply, patch apply/restore, dashboard state checks, address debug, dry-run preview) — the attach-as-liveness-check pattern was replaced with a plain `kill(pid, 0)` check, since mdbg no longer needs the attach to succeed first.
+- **Fixed a latent ucred race in the SDK's mdbg implementation.** `mdbg_copyin`/`mdbg_copyout` elevate the calling process's own credentials (authid + caps) around each call with no internal locking — the same process-wide race `pt.c`'s ptrace wrapper already guards against. `pt_ucred_lock()`/`pt_ucred_unlock()` were exposed from `pt.c` so mdbg and ptrace calls from different threads now serialize through the same lock.
+- **Went fully mdbg-only in the write path — ptrace removed from both remaining fallbacks (later in v0.14 development, supersedes the two bullet points originally here).** `write_process_memory_forced`'s mprotect-refused branch no longer retries via ptrace; it now writes directly through `mdbg_io_copyin` without ever having obtained RW on the page (no W^X exposure either way, since the page's protection bits are never touched in that branch). Confirmed working on real hardware. `write_via_codecave` (the `pt_mmap` code-cave remap fallback) was deleted entirely — it had no mdbg equivalent — which also removed the `cheat_codecave_fallback` config flag and its dashboard toggle ("Auto-relocate code caves"); any cheat that only ever applied via that remap will now fail to apply instead, with no replacement path. The only ptrace remaining anywhere in the codebase is the dev self-test endpoint (`handle_api_dev_memtest`), which is diagnostic-only and intentionally exercises ptrace itself.
+
+### Security & Reliability Audit
+
+A full review of every subsystem (~22k lines, excluding third-party code) turned up several real bugs, fixed the same day:
+
+- **Removed dead, non-functional HTTP auth plumbing.** The `X-CheatRunner-Token` header was parsed in `cr_http.c` but never compared against anything anywhere — `dev_reload_token` had already been separately deprecated from the config struct earlier, and the dashboard never sent the header either. Deleted the unused parsing/parameter-threading rather than wiring up real auth; CheatRunner's HTTP API remains intentionally unauthenticated, trusted-LAN-only by design.
+- **Shutdown could previously interrupt an in-flight memory write.** `cheatrunner_request_shutdown`'s `SIGKILL` could in theory fire between a W^X `mprotect(RW)` and its `mprotect(RX)` restore. All shutdown paths now take the same lock `cr_cheats.c` holds for the duration of a cheat apply/disable before killing the process.
+- **Fixed an undefined-behavior shift in patch XML hex-literal parsing.** `0x...`-style `Value` attributes longer than 16 hex digits triggered a `>>` shift of ≥64 bits in `cr_patch_parser.c`; now capped at 8 bytes (the literal can't represent more than 64 bits regardless).
+- **Conflict detection no longer compares addresses across unrelated modules.** `cr_conflict.c` previously compared raw offsets between mods without accounting for per-mod `module_name`/`section` resolution, risking false-positive (or missed) conflict pairs for any multi-module cheat file.
+- **Avatar upload now rejects oversized source images** before the resize allocations, instead of trusting decoded width/height from an untrusted upload body.
+- **Removed a duplicate `MAX_GAMES` constant** (`cr_api.c` and `cr_appdb.c` each independently defined `1024`) in favor of one shared definition.
+- **`jb_escalate_pid()`'s return value is now logged on failure** at its `cr_tile_pkg.c` call site instead of being silently discarded.
+- **Fixed a signed-overflow UB in cheat address resolution.** `cr_memory.c`'s offset arithmetic now adds in unsigned 64-bit before the final cast, instead of signed pointer arithmetic that could overflow on a huge/garbage offset from a malformed cheat file. The existing `ADDR_IN_USER_RANGE` check still catches out-of-range results identically to before.
+- **Fixed an unguarded read of `g_cfg_mtime`** in `cr_config.c`'s hot-reload check — now taken under the same lock every other config access uses.
+
+### Memory Engine — mprotect Removed From Both the Write and Read Paths (Stability Fixes)
+
+Two real kernel-panic/console-freeze incidents, both reproduced on hardware, traced back to `kernel_mprotect`/`kernel_get_vmem_protection` itself — not page protection state — corrupting kernel VM structures when called on a wrong or special memory page:
+
+- **`write_process_memory_forced` no longer calls `kernel_mprotect` at all.** Every write now goes straight through `mdbg_io_copyin`, the same path that was already used as a fallback whenever `mprotect` was refused — and which had already proven safe on real hardware repeatedly, including on addresses that had previously panicked the console when `mprotect` was attempted. mdbg bypasses page protection for the write itself, so the protection toggle was never actually required; PS5's x86-64 CPU also keeps same-core self-modifying code instruction-cache coherent without an explicit cache flush or protection transition, so no W→X step is needed for the patched code to execute correctly either. The cross-page write-splitting logic (a `kernel_mprotect` multi-page quirk workaround) was kept defensively since `mdbg_io_copyin`'s own multi-page behavior hasn't been separately verified.
+- **`read_process_memory`'s execute-only (`.text`) read fallback was removed for the same reason.** The v0.13 XOM fix added a slow path that called `kernel_get_vmem_protection` + `kernel_mprotect` to temporarily add `PROT_READ` when a fast `mdbg_io_copyout` read failed. This fallback is hit on *every* dashboard cheat-state refresh (each enabled mod's current bytes are re-read to show on/off/mismatch status), and reproduced a console hang on real hardware when the dashboard's cheat list stopped responding after enabling several mods that all resolved to the same wrong-address-pattern family already known to be risky. The fallback is now gone entirely — a failed fast-path read just returns "unreadable" instead of attempting the kernel call. Trade-off: legitimate execute-only `.text` pages that genuinely need the protection toggle to be read will now show as unreadable in cheat state instead of their real value.
+- **`cr_patch_parser.c`'s `mask`-type pattern scanner (`scan_for_pattern`) no longer scans past the first unreadable memory chunk.** It previously scanned up to a flat 384 MB ceiling from the module base regardless of read failures, skipping past any unmapped chunk and continuing deeper into unknown memory — reproduced a kernel panic on real hardware when applying a `mask`-type patch. It now stops at the first read failure (the practical edge of the mapped module) and is bounded by the same canonical user-address-range check (`ADDR_IN_USER_RANGE`, now shared via `cr_memory.h`) used elsewhere in the write/read engine.
+
+### Daemon Stability — Notification & Request-Buffer Fixes
+
+Found via a deliberate stress test (rapid repeated cheat toggling), reproduced and fixed the same day:
+
+- **`notify()` (PS5 system toast notifications) is now fire-and-forget on a detached thread.** It previously called `sceKernelSendNotificationRequest` synchronously from inside the cheat-apply path, while holding `g_cheat_apply_lock`. Under rapid repeated toggling this call stalled, and since it ran while holding that lock, the entire toggle subsystem froze — CheatRunner stopped responding to any request until the payload was re-sent. The actual notification syscall now runs on its own detached thread; a stall there no longer blocks anything else.
+- **The HTTP server no longer allocates 4 MB for every request.** `http_handle_client` previously `malloc`'d the full `MAX_REQ_SIZE` (4 MB) up front for every single connection, including the 5 background polling requests the dashboard fires every few seconds. It now starts with a 64 KB buffer and grows (`realloc`, doubling) only when an actual request needs more — the common case (polls, toggles) never grows past the initial allocation; large uploads (cheat files, avatars) still work via growth up to the same 4 MB ceiling.
+
+### Dashboard — Supporters List
+
+- Added Maffioh to the "Special thanks" list in the Support modal.
+
+### Version
+
+- Bumped to **0.14**.
+
+---
+
+## v0.13
+
 
 ### Write Engine — Execute-Only (XOM) Memory Reads
 

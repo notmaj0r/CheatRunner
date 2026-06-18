@@ -21,11 +21,10 @@ CheatRunner is focused on local/offline homebrew usage on an already-jailbroken 
 
 CheatRunner is free and open-source. If you find it useful, feel free to support the project.
 
-Ko-fi:
+[![Support me on Ko-fi](https://storage.ko-fi.com/cdn/kofi3.png?v=3)](https://ko-fi.com/maj0r)
+[![Buy me a coffee](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png)](https://buymeacoffee.com/maj0r)
 
-[![Support me on Ko-fi](https://www.ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/maj0r)
-
-[Join our Discord Server](https://discord.gg/E4g6fEqp46)
+[![Join our Discord Server](https://img.shields.io/badge/Discord-Join%20our%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/E4g6fEqp46)
 
 ---
 
@@ -78,6 +77,18 @@ Runtime cheat memory writes can crash the game, break a session, corrupt your sa
 - Logs panel.
 - Copy Logs / Copy Cheat Debug / Copy Diagnostic Bundle.
 - Shutdown Payload button for testing and cleanup.
+
+---
+
+## 🔄 Updating CheatRunner
+
+**Before updating to a new CheatRunner version, please follow these steps:**
+
+1. Go to `/data/cheatrunner` and delete **everything** except the `cheats` and `patches` folders.
+   - Keep both folders — there is **no need** to delete them.
+   - Do this **before** using the new CheatRunner version, **not after**.
+2. Delete the old **CheatRunner PKG** (home-screen tile) from your PS5.
+3. Clear your browser cache: **Settings → System → Browser → Clear Cache**.
 
 ---
 
@@ -268,7 +279,7 @@ Special thanks to:
 - **etaHEN** for the [PS5_Cheats](https://github.com/etaHEN/PS5_Cheats) project;
 - **GoldHEN** for the [GoldHEN_Cheat_Repository](https://github.com/GoldHEN/GoldHEN_Cheat_Repository) project;
 - **RDX-Sci01** for the [HEN-PPSA-Cheats](https://github.com/RDX-Sci01/HEN-PPSA-Cheats) project;
-- **illusionyy** for the [PS-Game-Patch](https://github.com/illusionyy/ps-game-patch) project;
+- **illusionyy** for the [PS-Game-Patch](https://github.com/illusionyy/ps-game-patch) and the [ps-patch-system](https://github.com/illusionyy/ps-patch-system) projects;
 - everyone testing, reporting logs, and helping improve the project.
 
 ---
