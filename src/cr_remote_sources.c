@@ -921,6 +921,9 @@ extract_version_from_filename(const char *filename, char *out, size_t out_size) 
     return;
   }
   sep++;
+  /* Hashes and process names may follow the version: TITLE_VERSION_SUFFIX.ext. */
+  const char *suffix = strchr(sep, '_');
+  if (suffix && suffix < dot) dot = suffix;
   size_t n = (size_t)(dot - sep);
   if (n == 0 || n + 1 >= out_size) {
     return;
