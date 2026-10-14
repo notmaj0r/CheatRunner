@@ -40,7 +40,10 @@
 
   /* ------------------------------------------------------------------- api */
   var sema = { n: 2, q: [] };
-  function acquire() { return new Promise(function (res) { if (sema.n > 0) { sema.n--; res(); } else sema.q.push(res); }); }
+  function acquire() {
+    if (sema.n <= 0 && sema.q.length >= 16) return Promise.reject(new Error('Too many queued requests'));
+    return new Promise(function (res) { if (sema.n > 0) { sema.n--; res(); } else sema.q.push(res); });
+  }
   function release() { if (sema.q.length) sema.q.shift()(); else sema.n++; }
 
   async function call(url, opts, method, body) {
@@ -507,6 +510,7 @@
     } catch (e) {
       // A missing file has its own state; any other failure means the live state could not be read.
       if (S.g && S.g.id === id && !(e.status === 404 && e.code === 'no cheat file')) S.g.stateErr = e;
+      return false;
     }
   }
   async function loadGamePage(id) {
@@ -1003,7 +1007,7 @@
       if (last >= 0) logs.seq = last;
       if (logs.list.length > 1500) logs.list = logs.list.slice(-1500);
       renderLogs();
-    } catch (e) {}
+    } catch (e) { return false; }
   }
 
   /* -------------------------------------------------------------- settings */
@@ -1118,7 +1122,7 @@
         if (p === 'games') paintGrid(); else if (p === 'game') { paintHero(); paintBody(); }
       }
       paintStatusChip();
-    } catch (e) { S.fail = (S.fail || 0) + 1; if (S.fail >= 2) setOffline(true); }
+    } catch (e) { S.fail = (S.fail || 0) + 1; if (S.fail >= 2) setOffline(true); return false; }
   }
   async function refreshState() {
     try {
@@ -1127,7 +1131,7 @@
       Array.prototype.forEach.call(document.querySelectorAll('.ver-text'), function (el) { el.textContent = 'v' + String(S.state.version || '').replace(/^v/, ''); });
       var p = route().page;
       if (p === 'system') paintStatus(); else if (p === 'game') paintHero();
-    } catch (e) {}
+    } catch (e) { return false; }
   }
   async function checkUpdate() {
     var cur = String((S.state || {}).version || '').replace(/^v/, ''), info = null;
@@ -1160,17 +1164,21 @@
       var ls = await get('/api/launch/status', { retries: 0 });
       var busy = !!ls.busy;
       if (busy !== S.launchBusy) { S.launchBusy = busy; if (route().page === 'games') paintGrid(); }
-    } catch (e) {}
+    } catch (e) { return false; }
   }
   function poller(fn, ms, when) {
     var fails = 0;
-    (function tick() {
+    (async function tick() {
       var delay = isPS5 ? ms * 2 : ms;
       if (document.hidden) delay = ms * 3;
       else if (!when || when()) {
-        Promise.resolve(fn()).then(function () { fails = 0; }, function () { fails++; });
+        try {
+          // Schedule only after settlement; a timeout must not queue another tick.
+          var result = await fn();
+          fails = result === false ? fails + 1 : 0;
+        } catch (e) { fails++; }
       }
-      setTimeout(tick, fails ? Math.min(ms * (1 << Math.min(fails, 4)), 60000) : delay);
+      setTimeout(tick, fails ? Math.max(delay, Math.min(ms * Math.pow(2, Math.min(fails, 4)), 60000)) : delay);
     })();
   }
 
@@ -1600,8 +1608,9 @@
     poller(refreshLogs, 6000, function () { return route().page === 'system'; });
     poller(async function () {
       var g = S.g; if (!g || route().page !== 'game' || g.tab !== 'cheats' || !g.loaded || Object.keys(g.applying).length) return;
-      await loadCheatState(g.id);
+      var result = await loadCheatState(g.id);
       if (S.g === g && route().page === 'game' && g.tab === 'cheats') paintMods();
+      return result;
     }, 6000);
   })();
 })();
