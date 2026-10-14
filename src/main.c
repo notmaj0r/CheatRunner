@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -8,6 +9,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include "jb.h"
@@ -65,19 +67,45 @@ find_old_instance(void) {
   return -1;
 }
 
-/* True if something accepts connections on the loopback port. */
+/* Bound startup probes even when an older instance accepts but never replies. */
 static int
-port_answers(int port) {
+connect_loopback(int port) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return 0;
+  if (fd < 0) return -1;
+  struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
+      setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+    close(fd);
+    return -1;
+  }
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) { close(fd); return -1; }
   struct sockaddr_in a;
   memset(&a, 0, sizeof(a));
   a.sin_family = AF_INET;
   a.sin_port = htons((uint16_t)port);
   a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  int up = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0;
+  int rc = connect(fd, (struct sockaddr *)&a, sizeof(a));
+  if (rc < 0 && errno == EINPROGRESS) {
+    struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+    rc = poll(&pfd, 1, 1000);
+    if (rc > 0) {
+      int err = 0;
+      socklen_t len = sizeof(err);
+      rc = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+      if (err) rc = -1;
+    } else rc = -1;
+  }
+  if (rc < 0 || fcntl(fd, F_SETFL, flags) < 0) { close(fd); return -1; }
+  return fd;
+}
+
+static int
+port_answers(int port) {
+  int fd = connect_loopback(port);
+  if (fd < 0) return 0;
   close(fd);
-  return up;
+  return 1;
 }
 
 /* An older CheatRunner can outlive the kill-by-name pass and keep serving its old dashboard; ask each one to exit. */
@@ -85,19 +113,12 @@ static void
 evict_old_instance(int port) {
   for (int round = 0; round < 2 && port_answers(port); round++) {
     cr_log("warn", "boot", "an older instance answers on port %d, asking it to exit", port);
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = connect_loopback(port);
     if (fd < 0) return;
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_port = htons((uint16_t)port);
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0) {
-      static const char req[] = "POST /api/dev/shutdown HTTP/1.0\r\nContent-Length: 0\r\n\r\n";
-      char junk[256];
-      (void)send(fd, req, sizeof(req) - 1, 0);
-      (void)recv(fd, junk, sizeof(junk), 0);
-    }
+    static const char req[] = "POST /api/dev/shutdown HTTP/1.0\r\nContent-Length: 0\r\n\r\n";
+    char junk[256];
+    (void)send(fd, req, sizeof(req) - 1, 0);
+    (void)recv(fd, junk, sizeof(junk), 0);
     close(fd);
     /* The old instance exits after its shutdown delay; give it time to drop the port. */
     for (int i = 0; i < 5; i++) usleep(300 * 1000);
