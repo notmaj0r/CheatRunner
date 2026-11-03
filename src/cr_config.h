@@ -41,6 +41,7 @@ typedef struct cheatrunner_config {
   int appdb_debug_names;
   char log_level[16];
   int cheat_master_code_fixup;
+  int cheat_auto_safeguards;   /* 1 = switch off conflicting cheats and switch on the Mastercode automatically */
   int cheat_inter_mod_delay_ms;
   int tile_autoinstall_enabled;
   int  hotkey_enabled; /* master switch, off by default - disables all SceShellUI hooking */

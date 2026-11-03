@@ -78,6 +78,7 @@ void handle_api_activity_title(int fd, const char *query);
 void handle_api_activity_reset(int fd);
 void handle_api_dev_privileges(int fd);
 void handle_api_dev_diag(int fd);
+void handle_api_dev_maps(int fd);
 void handle_api_dev_open_browser(int fd, const char *method, const char *query);
 void handle_api_dev_memtest(int fd);
 void handle_api_dev_shutdown(int fd, const char *method, const char *query,

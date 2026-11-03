@@ -56,6 +56,7 @@ typedef struct {
     char         author[128];
     char         note[512];
     char         app_ver[32];
+    char         app_elf[128];   /* target module; empty = eboot */
     int          is_mask_ver;   /* app_ver == "mask" */
     patch_line_t lines[PATCH_MAX_LINES];
     int          line_count;    /* supported lines only */

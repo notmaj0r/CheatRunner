@@ -372,9 +372,12 @@ cr_patch_compute_entry_id(patch_entry_t *entry) {
     char buf[1024];
     const char *ks = (entry->source_kind == CR_PATCH_SOURCE_CHEATRUNNER_PS5) ? "ps5" :
                      (entry->source_kind == CR_PATCH_SOURCE_CHEATRUNNER_XML)  ? "xml" : "elf";
-    snprintf(buf, sizeof(buf), "%s|%s|%d|%s|%s|%d",
-             entry->source_path, ks, entry->metadata_index,
-             entry->name, entry->app_ver, entry->line_count);
+    int n = snprintf(buf, sizeof(buf), "%s|%s|%d|%s|%s|%d",
+                     entry->source_path, ks, entry->metadata_index,
+                     entry->name, entry->app_ver, entry->line_count);
+    /* Only entries with an AppElf get the extra field, so existing ids (and autoload profiles) stay valid. */
+    if (entry->app_elf[0] && n > 0 && (size_t)n < sizeof(buf))
+        snprintf(buf + n, sizeof(buf) - (size_t)n, "|%s", entry->app_elf);
     uint32_t h = fnv1a32(buf, strlen(buf));
     snprintf(entry->entry_id, PATCH_ENTRY_ID_LEN, "%08x", (unsigned)h);
 }
@@ -953,6 +956,7 @@ patch_parse_xml_file(const char *xml_path, const char *title_id,
         tag_attr(meta_open, tag_end, "Author",    e->author,  sizeof(e->author));
         tag_attr(meta_open, tag_end, "Note",      e->note,    sizeof(e->note));
         tag_attr(meta_open, tag_end, "AppVer",    e->app_ver, sizeof(e->app_ver));
+        tag_attr(meta_open, tag_end, "AppElf",    e->app_elf, sizeof(e->app_elf));
         tag_attr(meta_open, tag_end, "ImageBase", imagebase_str, sizeof(imagebase_str));
 
         xml_decode(e->name);
@@ -1298,6 +1302,19 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
         return -1;
     }
 
+    intptr_t patch_base = base;
+    if (!entry->is_absolute_addr && entry->app_elf[0] &&
+        strcmp(entry->app_elf, "eboot.bin") != 0 &&
+        resolve_module_base(pid, entry->app_elf, base, &patch_base) != 0) {
+        g_cheat_applying = 0;
+        pthread_mutex_unlock(&g_cheat_apply_lock);
+        if (result) {
+            snprintf(result->error, 64, "module_not_loaded");
+            snprintf(result->message, 256, "module '%s' is not loaded", entry->app_elf);
+        }
+        return -1;
+    }
+
     /* Heap-allocate — 64 × 280 bytes = 17.5 KB would overflow the thread stack. */
     cr_patch_backup_t *backups = calloc(PATCH_MAX_LINES, sizeof(*backups));
     if (!backups) {
@@ -1338,7 +1355,7 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
         if (ln->type == PATCH_LINE_MASK_JUMP32) {
             /* Detour trampoline: a JMP redirects the hook site (Address+Offset) into the cave (Target), which holds
              * Value and a JMP back. Three writes, each with its own backup so rollback restores everything. */
-            intptr_t patch_match = scan_for_pattern(pid, base, MASK_SCAN_LIMIT,
+            intptr_t patch_match = scan_for_pattern(pid, patch_base, MASK_SCAN_LIMIT,
                                                     ln->pattern, ln->wildcard, ln->pattern_len);
             if (!patch_match) {
                 cr_log("warn", "patches", "mask_jump32 addr_not_found line=%d title=%s - line skipped", i, title_id);
@@ -1347,7 +1364,7 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
             }
             intptr_t patch_addr = patch_match + (intptr_t)ln->match_offset;
 
-            intptr_t cave_addr = scan_for_pattern(pid, base, MASK_SCAN_LIMIT,
+            intptr_t cave_addr = scan_for_pattern(pid, patch_base, MASK_SCAN_LIMIT,
                                                   ln->target_pattern, ln->target_wildcard,
                                                   ln->target_pattern_len);
             if (!cave_addr) {
@@ -1426,7 +1443,7 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
         if (ln->type == PATCH_LINE_MASK) {
             cr_log("info", "patches", "mask_scan pattern_len=%zu offset=%d title=%s",
                    ln->pattern_len, ln->match_offset, title_id);
-            intptr_t match = scan_for_pattern(pid, base, MASK_SCAN_LIMIT,
+            intptr_t match = scan_for_pattern(pid, patch_base, MASK_SCAN_LIMIT,
                                               ln->pattern, ln->wildcard, ln->pattern_len);
             if (!match) {
                 cr_log("warn", "patches", "mask_scan not_found line=%d title=%s - line skipped", i, title_id);
@@ -1464,7 +1481,7 @@ patch_apply_entry_ex(const char *title_id, const patch_entry_t *entry,
                 }
             }
         } else {
-            write_addr = entry->is_absolute_addr ? ln->offset : (base + ln->offset);
+            write_addr = entry->is_absolute_addr ? ln->offset : (patch_base + ln->offset);
             cr_log("info", "patches", "line[%d] write addr=0x%lx len=%zu abs=%d",
                    i, (long)write_addr, ln->value_len, entry->is_absolute_addr);
         }

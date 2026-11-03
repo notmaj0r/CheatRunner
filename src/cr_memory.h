@@ -33,6 +33,17 @@ void bytes_to_hex(const uint8_t *bytes, size_t len, char *out, size_t out_size);
 
 /* Returns 0 and sets *out_base to the module's map base (the eboot base if module_name is empty).
  * Returns -1 if the module is not loaded (callers report "module_not_loaded"). */
+struct cJSON;
+
+/* Module handle index from an entry's "section" (a number, or number-like text); 0 when absent or invalid. */
+int cheat_entry_section(const struct cJSON *entry);
+
+/* Start of region `index` in the process VM map, only if `off` falls inside it; 0 otherwise. */
+intptr_t vmmap_region_base(pid_t pid, int index, uint64_t off);
+
+/* Base for one memory entry: the "section" as a dynlib handle, else as a VM map region index, else mod_base. */
+intptr_t cheat_entry_base(pid_t pid, const struct cJSON *entry, intptr_t mod_base, uint64_t off);
+
 int resolve_module_base(pid_t pid, const char *module_name, intptr_t eboot_base, intptr_t *out_base);
 
 /* Returns 1 if the process has libScePs2EmuMenuDialog.sprx loaded (PS2 emulation mode). */

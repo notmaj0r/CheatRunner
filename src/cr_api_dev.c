@@ -36,6 +36,10 @@ cr_api_dev_handle(int fd, const char *method, const char *path,
     handle_api_dev_diag(fd);
     return 1;
   }
+  if (!strcmp(path, "/api/dev/maps")) {
+    handle_api_dev_maps(fd);
+    return 1;
+  }
   if (!strcmp(path, "/api/dev/open-browser")) {
     handle_api_dev_open_browser(fd, method, query);
     return 1;

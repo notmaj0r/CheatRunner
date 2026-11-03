@@ -4,11 +4,12 @@
 # Usage:
 #   make                 # build build-make/CheatRunner.elf
 #   make clean
+#   make test            # host-side tests
 #   make SQLITE=1        # force-enable bundled sqlite3 (auto-detected otherwise)
 #   make SQLITE=0        # force-disable it
-#   PS5_PAYLOAD_SDK=/path/to/sdk make
+#   PS5_PAYLOAD_SDK=/path/to/sdk make   # only used when /opt/ps5-payload-sdk is missing
 
-VERSION := 0.17.1
+VERSION := 0.18.1
 
 BUILD_DIR := build-make
 GENDIR    := $(BUILD_DIR)/gen
@@ -18,13 +19,13 @@ ELF       := $(BUILD_DIR)/CheatRunner.elf
 # ---------------------------------------------------------------- SDK resolve
 PS5_PAYLOAD_SDK ?=
 SDK_ROOT := $(patsubst %/toolchain/prospero.cmake,%,$(firstword \
+  $(wildcard /opt/ps5-payload-sdk/toolchain/prospero.cmake) \
   $(wildcard $(PS5_PAYLOAD_SDK)/toolchain/prospero.cmake) \
-  $(wildcard ../../ps5-payload-sdk/toolchain/prospero.cmake) \
-  $(wildcard ps5-payload-sdk/toolchain/prospero.cmake) \
-  $(wildcard /opt/ps5-payload-sdk/toolchain/prospero.cmake)))
+  $(wildcard PS5-Projects/sdk-master/toolchain/prospero.cmake) \
+  $(wildcard ps5-payload-sdk/toolchain/prospero.cmake)))
 
 ifeq ($(SDK_ROOT),)
-$(error PS5 payload SDK not found. Set PS5_PAYLOAD_SDK, or place it at ../../ps5-payload-sdk, ./ps5-payload-sdk, or /opt/ps5-payload-sdk)
+$(error PS5 payload SDK not found. Install it at /opt/ps5-payload-sdk, or set PS5_PAYLOAD_SDK)
 endif
 
 CC     := $(SDK_ROOT)/bin/prospero-clang
@@ -37,7 +38,8 @@ SRC_C := $(wildcard src/*.c) \
   src/third_party/stb_impl.c \
   src/third_party/mc4/aes.c \
   src/third_party/mc4/base64.c \
-  src/third_party/mc4/mc4decrypter.c
+  src/third_party/mc4/mc4decrypter.c \
+  src/third_party/miniz.c
 SRC_CPP := $(wildcard src/*.cpp)
 
 SQLITE ?= $(if $(and $(wildcard src/third_party/sqlite3.c),$(wildcard src/third_party/sqlite3.h)),1,0)
@@ -55,7 +57,7 @@ PKG_SRC := $(wildcard dist/CheatRunner.pkg)
 HAVE_TILE_PKG := $(if $(PKG_SRC),1,0)
 
 PAYLOAD_ELF := $(BUILD_DIR)/payload/cr_getdata_payload.elf
-PAYLOAD_SRC := src/payload/cr_getdata_payload.c src/payload/cr_detour.c src/payload/hde64.c
+PAYLOAD_SRC := src/payload/cr_getdata_payload.c src/payload/cr_detour.c src/payload/cr_plog.c src/payload/cr_reloc.c src/payload/hde64.c
 
 GEN_HEADERS := $(GENDIR)/cr_getdata_payload_blob.h $(GENDIR)/cheatrunner_png.h $(GENDIR)/cheatrunner_tile_pkg.h \
   $(GENDIR)/dashboard_html_gz.h $(GENDIR)/dashboard_css_gz.h $(GENDIR)/dashboard_js_gz.h
@@ -74,19 +76,34 @@ DEFINES += -DCHEATRUNNER_HAVE_SQLITE_APPDB=1 -DSQLITE_THREADSAFE=0 \
 endif
 
 INCLUDES := -I$(GENDIR) -Isrc
-CFLAGS   := -fPIE -Wall -Wextra -O2 $(INCLUDES) $(DEFINES)
+CFLAGS   := -fPIE -Wall -Wextra -O2 -ffunction-sections -fdata-sections $(INCLUDES) $(DEFINES)
 CXXFLAGS := $(CFLAGS)
 LDFLAGS  := -Wl,--allow-multiple-definition
-LIBS     := -lkernel_sys -lSceSystemService -lSceUserService -lSceAppInstUtil \
-  -lSceHttp -lSceSsl -lSceNet -lScePad -lpthread
 
-.PHONY: all clean
+# Cold bundled libraries are built for size; our own code stays at -O2.
+SIZE_OBJS := $(OBJDIR)/third_party/sqlite3.o $(OBJDIR)/third_party/miniz.o $(OBJDIR)/third_party/stb_impl.o
+$(SIZE_OBJS): CFLAGS := $(subst -O2,-Os,$(CFLAGS))
+LIBS     := -lkernel_sys -lSceSystemService -lSceUserService -lSceAppInstUtil \
+  -lSceHttp -lSceSsl -lSceNet -lpthread
+
+# Host tests: pure logic (versions, hex, conflicts, patch XML) built with the host compiler, no console needed.
+TEST_SRC := tests/test_main.c tests/host_stubs.c src/cr_version.c src/cr_sha1.c src/cr_memory.c \
+  src/cr_conflict.c src/cr_patch_parser.c src/third_party/cJSON.c
+
+.PHONY: all clean probe test
+.DEFAULT_GOAL := all
+
+test: | $(BUILD_DIR)
+	cc -g -O1 -w -fsanitize=address,undefined -Isrc -Itests/stubs -o $(BUILD_DIR)/cr_tests $(TEST_SRC) -lm -lpthread
+	$(BUILD_DIR)/cr_tests
 
 all: $(ELF)
 
 $(ELF): $(OBJS) | $(BUILD_DIR)
-	$(CXX) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+	$(CXX) $(LDFLAGS) -Wl,--gc-sections -o $@ $(OBJS) $(LIBS)
 	@if [ -x "$(STRIP)" ]; then $(STRIP) --strip-all $@; fi
+
+$(OBJDIR)/cr_api.o: src/dashboard_html.inc src/dashboard_css.inc src/dashboard_js.inc
 
 $(OBJDIR)/%.o: src/%.c $(GEN_HEADERS)
 	@mkdir -p $(dir $@)
@@ -105,6 +122,14 @@ $(PAYLOAD_ELF): $(PAYLOAD_SRC) | $(BUILD_DIR)
 $(GENDIR)/cr_getdata_payload_blob.h: $(PAYLOAD_ELF) tools/gen_blob_header.py | $(GENDIR)
 	python3 tools/gen_blob_header.py $< $@ g_cr_getdata_payload_elf
 
+# Short hash of the sources and assets, shown in the log so each session says which ELF ran.
+.PHONY: FORCE
+$(GENDIR)/build_id.h: FORCE | $(GENDIR)
+	@id=$$(find src Makefile CheatRunner.png dist -type f ! -name 'dashboard_*.inc' 2>/dev/null | sort | xargs sha1sum | sha1sum | cut -c1-7); \
+	line="#define CHEATRUNNER_BUILD_ID \"$$id\""; \
+	[ "$$(cat $@ 2>/dev/null)" = "$$line" ] || echo "$$line" > $@
+$(OBJDIR)/main.o $(OBJDIR)/cr_log.o: $(GENDIR)/build_id.h
+
 $(GENDIR)/cheatrunner_png.h: $(PNG_SRC) | $(GENDIR)
 	@if [ -f CheatRunner.png ]; then \
 	  python3 -c "d=open('CheatRunner.png','rb').read(); open('$@','w').write('static const unsigned char g_cheatrunner_png[] = {'+','.join(str(b) for b in d)+'};\n')"; \
@@ -119,6 +144,18 @@ $(GENDIR)/cheatrunner_tile_pkg.h: $(PKG_SRC) | $(GENDIR)
 	  printf '/* dist/CheatRunner.pkg not present -- auto-install disabled */\n' > $@; \
 	fi
 
+# Dashboard sources live in src/web/; the .inc files are generated from them.
+src/dashboard_html.inc: src/web/index.html tools/gen_dashboard_inc.py
+	python3 tools/gen_dashboard_inc.py $< $@
+src/dashboard_css.inc: src/web/app.css tools/gen_dashboard_inc.py
+	python3 tools/gen_dashboard_inc.py $< $@
+$(GENDIR)/dashboard_i18n.js: tools/gen_i18n_js.py $(wildcard src/web/locales/*.json) $(wildcard src/web/flags/*.svg) | $(GENDIR)
+	python3 tools/gen_i18n_js.py $@
+$(GENDIR)/dashboard_bundle.js: src/web/qrcode.js $(GENDIR)/dashboard_i18n.js src/web/i18n.js src/web/app.js | $(GENDIR)
+	cat $^ > $@
+src/dashboard_js.inc: $(GENDIR)/dashboard_bundle.js tools/gen_dashboard_inc.py
+	python3 tools/gen_dashboard_inc.py $< $@
+
 $(GENDIR)/dashboard_%_gz.h: src/dashboard_%.inc tools/gen_gzip_header.py | $(GENDIR)
 	python3 tools/gen_gzip_header.py $< $@ g_dashboard_$*_gz
 
@@ -127,3 +164,8 @@ $(GENDIR) $(BUILD_DIR):
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+# Test-only probe for SceShellUI (not part of `all`).
+probe: $(BUILD_DIR)/ShellUIProbe.elf
+$(BUILD_DIR)/ShellUIProbe.elf: tools/shellui_probe.c src/jb.c | $(BUILD_DIR)
+	$(CC) -fPIE -Wall -Wextra -O2 -Isrc $(LDFLAGS) -o $@ $^ -lkernel_sys

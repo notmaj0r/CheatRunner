@@ -47,6 +47,7 @@ cheatrunner_config_t g_cfg = {
     .log_level = "debug",
     /* On by default: only engages for MC-dependent mods, so working cheats are unaffected. */
     .cheat_master_code_fixup = 1,
+    .cheat_auto_safeguards = 1,
     .cheat_inter_mod_delay_ms = 0,
     .tile_autoinstall_enabled = 1,
     .hotkey_enabled = 0,
@@ -94,6 +95,7 @@ config_set_defaults(cheatrunner_config_t *cfg) {
       .appdb_debug_names = 0,
       .log_level = "debug",
       .cheat_master_code_fixup = 0,
+      .cheat_auto_safeguards = 1,
       .cheat_inter_mod_delay_ms = 0,
       .tile_autoinstall_enabled = 1,
       .hotkey_enabled = 0,
@@ -140,6 +142,7 @@ config_save_locked(void) {
       "appdb_debug_names=%d\n"
       "log_level=%s\n"
       "cheat_master_code_fixup=%d\n"
+      "cheat_auto_safeguards=%d\n"
       "cheat_inter_mod_delay_ms=%d\n"
       "tile_autoinstall_enabled=%d\n"
       "hotkey_enabled=%d\n"
@@ -165,6 +168,7 @@ config_save_locked(void) {
       g_cfg.title_lookup_enabled, g_cfg.title_lookup_cache_enabled, g_cfg.title_lookup_timeout_ms,
       g_cfg.games_cache_ttl_ms, g_cfg.appdb_debug_names, g_cfg.log_level,
       g_cfg.cheat_master_code_fixup,
+      g_cfg.cheat_auto_safeguards,
       g_cfg.cheat_inter_mod_delay_ms,
       g_cfg.tile_autoinstall_enabled,
       g_cfg.hotkey_enabled, g_cfg.hotkey_button_a, g_cfg.hotkey_button_b, g_cfg.hotkey_hold_ms,
@@ -276,6 +280,8 @@ config_load(void) {
       /* Always starts at debug; a change in Settings lasts until the next start. */
     } else if (!strcmp(k, "cheat_master_code_fixup")) {
       g_cfg.cheat_master_code_fixup = atoi(v) ? 1 : 0;
+    } else if (!strcmp(k, "cheat_auto_safeguards")) {
+      g_cfg.cheat_auto_safeguards = atoi(v) ? 1 : 0;
     } else if (!strcmp(k, "cheat_inter_mod_delay_ms")) {
       int cv = atoi(v);
       g_cfg.cheat_inter_mod_delay_ms = (cv >= 0 && cv <= 10000) ? cv : 0;

@@ -1,5 +1,14 @@
 # CheatRunner — Changelog
 
+## v0.18.1
+
+- **Added: XML patches can target a loaded module through `AppElf`;** with `ImageBase`, addresses are resolved relative to that module, and an unloaded module reports `module_not_loaded`.
+- **Fixed: PS4 games whose module list returns a zero base showed "BASE NOT READY" on every cheat;** the main executable is now taken from the process memory map.
+- **Fixed: starting CheatRunner could hang forever when a previous instance accepted connections but never answered the shutdown request.**
+- **Fixed: dashboard polling requests piled up when the console was slow;** each poll now waits for the previous one and backs off after failures.
+- **Fixed: cheat entries with `section` written as text (`"section": "11"`, common in HEN cheat files) used the wrong module,** so they showed a false mismatch or wrote to the wrong address; a `section` that is not a module handle now points at the matching region of the process memory map.
+- **Added: Settings > Advanced > Cheat safeguards switch;** turn it off to enable cheats that overlap, and to stop the Mastercode from being switched on for you.
+
 ## v0.18
 
 - **Added: 16 languages** with flags and a language picker; Arabic and Persian read right to left.

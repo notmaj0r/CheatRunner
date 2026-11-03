@@ -105,6 +105,97 @@ find_pid_for_app_id(uint32_t app_id) {
   return result;
 }
 
+/* kinfo_vmentry layout (FreeBSD 11, as the PS5 kernel reports it). */
+#define VME_TYPE_OFF   4
+#define VME_START_OFF  8
+#define VME_PROT_OFF   56
+#define VME_PATH_OFF   136
+#define VME_TYPE_VNODE 2
+#define VME_PROT_EXEC  4
+
+/* kinfo_vmentry layout (FreeBSD 11, as the PS5 kernel reports it). */
+#define VME_TYPE_OFF   4
+#define VME_START_OFF  8
+#define VME_END_OFF    16
+#define VME_PROT_OFF   56
+#define VME_PATH_OFF   136
+
+int
+vmmap_read(pid_t pid, vm_region_t *out, int max) {
+  int mib[4] = { CTL_KERN, KERN_PROC, 32 /* KERN_PROC_VMMAP */, pid };
+  size_t len = 0;
+  if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0 || len == 0) {
+    return 0;
+  }
+  len += 8192;
+  uint8_t *buf = malloc(len);
+  if (!buf || sysctl(mib, 4, buf, &len, NULL, 0) != 0) {
+    free(buf);
+    return 0;
+  }
+  int n = 0;
+  for (uint8_t *p = buf; n < max && (size_t)((buf + len) - p) > sizeof(int);) {
+    int sz;
+    memcpy(&sz, p, sizeof(sz));
+    if (sz <= 0 || (size_t)sz > (size_t)((buf + len) - p)) break;
+    if (sz > VME_PATH_OFF) {
+      vm_region_t *r = &out[n++];
+      memcpy(&r->type, p + VME_TYPE_OFF, sizeof(r->type));
+      memcpy(&r->start, p + VME_START_OFF, sizeof(r->start));
+      memcpy(&r->end, p + VME_END_OFF, sizeof(r->end));
+      memcpy(&r->prot, p + VME_PROT_OFF, sizeof(r->prot));
+      snprintf(r->path, sizeof(r->path), "%.*s", (int)((size_t)sz - VME_PATH_OFF < sizeof(r->path) - 1 ? (size_t)sz - VME_PATH_OFF : sizeof(r->path) - 1), (const char *)p + VME_PATH_OFF);
+    }
+    p += sz;
+  }
+  free(buf);
+  return n;
+}
+
+/* The module list can return 0 for some PS4 titles; take the main executable from the VM map instead. */
+static intptr_t
+eboot_base_from_vmmap(pid_t pid) {
+  vm_region_t *r = malloc(VMMAP_MAX * sizeof(*r));
+  int n = r ? vmmap_read(pid, r, VMMAP_MAX) : 0;
+  uint64_t named = 0, lowest = 0;
+  for (int i = 0; i < n; i++) {
+    if (r[i].type != VME_TYPE_VNODE || !(r[i].prot & VME_PROT_EXEC) || !r[i].start) continue;
+    size_t plen = strlen(r[i].path);
+    if (plen >= 9 && !memcmp(r[i].path + plen - 9, "eboot.bin", 9) && (!named || r[i].start < named)) named = r[i].start;
+    if (!lowest || r[i].start < lowest) lowest = r[i].start;
+  }
+  free(r);
+  /* Without the path, only trust the lowest executable mapping if it sits where a PS4 executable loads (below 4 GB). */
+  return (intptr_t)(named ? named : (lowest && lowest < 0x100000000ULL ? lowest : 0));
+}
+
+/* Looked up once per pid; a miss is retried every few seconds in case the game is still loading. */
+static intptr_t
+eboot_base_cached(pid_t pid) {
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  static pid_t c_pid = -1;
+  static intptr_t c_base;
+  static time_t c_tried;
+  intptr_t base = 0;
+  pthread_mutex_lock(&lock);
+  time_t now = time(NULL);
+  if (c_pid != pid) {
+    c_pid = pid;
+    c_base = 0;
+    c_tried = 0;
+  }
+  if (!c_base && now - c_tried >= 3) {
+    c_tried = now;
+    c_base = eboot_base_from_vmmap(pid);
+    if (c_base) {
+      cr_log("info", "game", "eboot base 0x%lx taken from the VM map (module list returned 0) pid=%d", (long)c_base, (int)pid);
+    }
+  }
+  base = c_base;
+  pthread_mutex_unlock(&lock);
+  return base;
+}
+
 int
 get_running_game_ex(pid_t *out_pid, char *out_title, size_t title_size, intptr_t *out_base, int *out_app_id) {
   int app_id = sceSystemServiceGetAppIdOfRunningBigApp();
@@ -136,7 +227,8 @@ get_running_game_ex(pid_t *out_pid, char *out_title, size_t title_size, intptr_t
     snprintf(out_title, title_size, "%s", title_id_buf);
   }
   if (out_base) {
-    *out_base = kernel_dynlib_mapbase_addr(pid, 0);
+    intptr_t base = kernel_dynlib_mapbase_addr(pid, 0);
+    *out_base = base ? base : eboot_base_cached(pid);
   }
   if (out_app_id) {
     *out_app_id = app_id;
@@ -299,7 +391,7 @@ typedef struct {
   pid_t pid;
 } autoload_seq_ctx_t;
 
-/* Patches before cheats, off the monitor thread — both calls now block. */
+/* Patches before cheats, off the monitor thread, since both calls block. */
 static void *
 autoload_sequence_thread(void *arg) {
   autoload_seq_ctx_t *ctx = (autoload_seq_ctx_t *)arg;

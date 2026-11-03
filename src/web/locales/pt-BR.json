@@ -415,5 +415,7 @@
 "Credits": "Créditos",
 "Download community patch sets. Patches are saved to /data/cheatrunner/patches.": "Baixe conjuntos de patches da comunidade. Os patches são salvos em /data/cheatrunner/patches.",
 "Open repository": "Abrir repositório",
-"Patch source": "Fonte de patches"
+"Patch source": "Fonte de patches",
+"Cheat safeguards": "Proteções dos cheats",
+"On: turning a cheat on switches off the cheats it conflicts with and switches on the Mastercode it needs. Off: nothing is changed for you.": "Ligado: ao ativar um cheat, os que conflitam com ele são desligados e o Mastercode necessário é ligado. Desligado: nada é alterado por você."
 }

@@ -75,7 +75,7 @@ state_log_due(void) {
 #endif
 
 #ifndef CHEATRUNNER_VERSION
-#define CHEATRUNNER_VERSION "0.18"
+#define CHEATRUNNER_VERSION "0.18.1"
 #endif
 
 #define MAX_GAMES CR_APPDB_MAX_GAMES
@@ -2047,11 +2047,12 @@ handle_api_cheats_state(int fd, const char *query) {
         }
         /* PS2 emulation: all addresses absolute (matches apply_cheat_json). */
         int af_s = (cJSON_IsTrue(abs_j) || is_ps2_st) ? 1 : 0;
-        intptr_t addr = cheat_resolve_addr(pid, mod_base_st, off_u, af_s,
+        intptr_t eb_st = cheat_entry_base(pid, m, mod_base_st, off_u);
+        intptr_t addr = cheat_resolve_addr(pid, eb_st, off_u, af_s,
                                            on_b, exp_len > 0 ? exp_b : NULL, on_len);
         /* Try absolute candidate for ADDRESS_UNRESOLVED detection */
         intptr_t abs_cand2 = (intptr_t)off_u;
-        intptr_t rel_cand2 = mod_base_st + (intptr_t)off_u;
+        intptr_t rel_cand2 = eb_st + (intptr_t)off_u;
         if (t_state_verbose) cr_log("debug", "cheats.state",
                "read_state mod=%d off=0x%llx addr=0x%lx abs=0x%lx rel=0x%lx len=%zu",
                idx, (unsigned long long)off_u, (long)addr,
@@ -2147,7 +2148,7 @@ handle_api_cheats_state(int fd, const char *query) {
                    "mismatch title=%s contentVersion=%s file=%s format=%s mod=\"%s\" modIndex=%d writeIndex=%d pid=%d "
                    "base=0x%lx offset=%s addr=%s expected=%s...(len=%zu) current=%s...(len=%zu) on=%s...(len=%zu)%s",
                    title_id, st.content_version[0] ? st.content_version : "unknown", cheat_path, fmt, mod_name, mod_index,
-                   total - 1, (int)pid, (long)mod_base_st, off_hex_addr, addr_hex, exp_hex, on_len, cur_hex, on_len, on_hex, on_len,
+                   total - 1, (int)pid, (long)eb_st, off_hex_addr, addr_hex, exp_hex, on_len, cur_hex, on_len, on_hex, on_len,
                    cur_is_ascii ? " [hint: current bytes are printable ASCII — offset likely points to game string data, not code]" : "");
             mismatch_logged = 1;
           }
@@ -2159,7 +2160,7 @@ handle_api_cheats_state(int fd, const char *query) {
             char abs_cur_hex[128], rel_cur_hex[128];
             uint8_t abs_buf[32], rel_buf[32];
             intptr_t abs_cand = (intptr_t)off_u;
-            intptr_t rel_cand = mod_base_st + (intptr_t)off_u;
+            intptr_t rel_cand = eb_st + (intptr_t)off_u;
             int abs_read = (hex_cap <= sizeof(abs_buf) && read_process_memory(pid, abs_cand, abs_buf, hex_cap) == 0);
             int rel_read = (hex_cap <= sizeof(rel_buf) && read_process_memory(pid, rel_cand, rel_buf, hex_cap) == 0);
             bytes_to_hex(cur, hex_cap, cur_hex, sizeof(cur_hex));
@@ -2276,7 +2277,7 @@ handle_api_cheats_state(int fd, const char *query) {
       pthread_mutex_unlock(&g_conflict_cache.lock);
     }
     int active_conflict_mod = -1;
-    if (conflict_count > 0 && can_probe &&
+    if (conflict_count > 0 && can_probe && g_cfg.cheat_auto_safeguards &&
         state != CHEAT_STATE_ON && state != CHEAT_STATE_ON_UNVERIFIED &&
         state != CHEAT_STATE_CRASH_SUSPECT) {
       for (int _ci = 0; _ci < conflict_count; _ci++) {
@@ -2694,7 +2695,7 @@ check_mod_enable_state(const char *title_id, int mod_index, char *reason, size_t
       }
       /* PS2 emulation: all addresses absolute (matches apply_cheat_json). */
       int af_cme = (cJSON_IsTrue(abs_j) || is_ps2_cme) ? 1 : 0;
-      intptr_t addr = cheat_resolve_addr(st.pid, mod_base_cme, off_u, af_cme,
+      intptr_t addr = cheat_resolve_addr(st.pid, cheat_entry_base(st.pid, m, mod_base_cme, off_u), off_u, af_cme,
                                          on_b, exp_len > 0 ? exp_b : NULL, on_len);
       if (read_process_memory(st.pid, addr, cur, on_len) != 0) {
         state = CHEAT_STATE_READ_FAILED;
@@ -2899,9 +2900,10 @@ handle_api_cheats_apply_dryrun(int fd, const char *query) {
 
       /* PS2 emulation: all addresses absolute (matches apply_cheat_json). */
       int af = (cJSON_IsTrue(abs_j) || is_ps2_dr) ? 1 : 0;
+      intptr_t eb_dr = (pid > 0 && attached) ? cheat_entry_base(pid, m, mod_base_dr, off_u) : mod_base_dr;
       intptr_t addr = (pid > 0 && attached) ?
-        cheat_resolve_addr(pid, mod_base_dr, off_u, af, on_b, exp_len > 0 ? exp_b : NULL, on_len) :
-        (af ? (intptr_t)off_u : mod_base_dr + (intptr_t)off_u);
+        cheat_resolve_addr(pid, eb_dr, off_u, af, on_b, exp_len > 0 ? exp_b : NULL, on_len) :
+        (af ? (intptr_t)off_u : eb_dr + (intptr_t)off_u);
 
       char addrh[32]; snprintf(addrh, sizeof(addrh), "0x%lx", (long)addr);
       cJSON_AddStringToObject(we, "addr", addrh);
@@ -3691,6 +3693,58 @@ handle_api_dev_privileges(int fd) {
 }
 
 /* ── /api/dev/diag ──────────────────────────────────────────────── */
+/* Read-only: VM map and dynlib bases of the running game, to see what a cheat "section" points at. */
+void
+handle_api_dev_maps(int fd) {
+  running_game_state_t rgs;
+  running_state_get(&rgs);
+  if (!rgs.running || rgs.pid <= 0) {
+    http_send_json(fd, 200, "{\"ok\":false,\"error\":\"no game running\"}");
+    return;
+  }
+  cJSON *out = cJSON_CreateObject();
+  cJSON_AddBoolToObject(out, "ok", 1);
+  cJSON_AddStringToObject(out, "titleId", rgs.title_id);
+  cJSON_AddNumberToObject(out, "pid", (double)rgs.pid);
+  char hx[32];
+  snprintf(hx, sizeof(hx), "0x%lx", (long)rgs.image_base);
+  cJSON_AddStringToObject(out, "imageBase", hx);
+
+  cJSON *dl = cJSON_AddArrayToObject(out, "dynlib");
+  for (uint32_t h = 0; h < 128; h++) {
+    intptr_t b = kernel_dynlib_mapbase_addr(rgs.pid, h);
+    if (b <= 0) continue;
+    cJSON *e = cJSON_CreateObject();
+    cJSON_AddNumberToObject(e, "handle", (double)h);
+    snprintf(hx, sizeof(hx), "0x%lx", (long)b);
+    cJSON_AddStringToObject(e, "base", hx);
+    cJSON_AddItemToArray(dl, e);
+  }
+
+  cJSON *vm = cJSON_AddArrayToObject(out, "vmmap");
+  vm_region_t *r = malloc(VMMAP_MAX * sizeof(*r));
+  int n = r ? vmmap_read(rgs.pid, r, VMMAP_MAX) : 0;
+  for (int i = 0; i < n; i++) {
+    cJSON *e = cJSON_CreateObject();
+    cJSON_AddNumberToObject(e, "i", i);
+    snprintf(hx, sizeof(hx), "0x%llx", (unsigned long long)r[i].start);
+    cJSON_AddStringToObject(e, "start", hx);
+    snprintf(hx, sizeof(hx), "0x%llx", (unsigned long long)r[i].end);
+    cJSON_AddStringToObject(e, "end", hx);
+    cJSON_AddNumberToObject(e, "prot", r[i].prot);
+    cJSON_AddNumberToObject(e, "type", r[i].type);
+    cJSON_AddStringToObject(e, "path", r[i].path);
+    cJSON_AddItemToArray(vm, e);
+  }
+  free(r);
+
+  char *txt = cJSON_PrintUnformatted(out);
+  cJSON_Delete(out);
+  if (!txt) { http_send_oom(fd); return; }
+  http_send_json(fd, 200, txt);
+  free(txt);
+}
+
 void
 handle_api_dev_diag(int fd) {
   cJSON *out = cJSON_CreateObject();

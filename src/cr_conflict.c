@@ -60,7 +60,6 @@ conflict_map_build(const char *json_text, cheat_conflict_map_t *out) {
             cJSON *off_j = cJSON_GetObjectItem(e, "offset");
             cJSON *on_j  = cJSON_GetObjectItem(e, "on");
             cJSON *abs_j = cJSON_GetObjectItem(e, "absolute");
-            cJSON *sec_j = cJSON_GetObjectItem(e, "section");
             if (!cJSON_IsString(off_j) || !cJSON_IsString(on_j)) continue;
             uint64_t off_u = 0;
             if (parse_offset_hex_checked(off_j->valuestring, &off_u) != 0) continue;
@@ -72,7 +71,7 @@ conflict_map_build(const char *json_text, cheat_conflict_map_t *out) {
             ce->off    = off_u;
             ce->len    = on_len;
             ce->is_abs = cJSON_IsTrue(abs_j) ? 1 : 0;
-            ce->section = (cJSON_IsNumber(sec_j) && sec_j->valuedouble > 0) ? (int)sec_j->valuedouble : 0;
+            ce->section = cheat_entry_section(e);
             snprintf(ce->module_name, sizeof(ce->module_name), "%s", module_name);
         }
     }

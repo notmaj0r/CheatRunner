@@ -40,10 +40,7 @@
 
   /* ------------------------------------------------------------------- api */
   var sema = { n: 2, q: [] };
-  function acquire() {
-    if (sema.n <= 0 && sema.q.length >= 16) return Promise.reject(new Error('Too many queued requests'));
-    return new Promise(function (res) { if (sema.n > 0) { sema.n--; res(); } else sema.q.push(res); });
-  }
+  function acquire() { return new Promise(function (res) { if (sema.n > 0) { sema.n--; res(); } else sema.q.push(res); }); }
   function release() { if (sema.q.length) sema.q.shift()(); else sema.n++; }
 
   async function call(url, opts, method, body) {
@@ -510,7 +507,6 @@
     } catch (e) {
       // A missing file has its own state; any other failure means the live state could not be read.
       if (S.g && S.g.id === id && !(e.status === 404 && e.code === 'no cheat file')) S.g.stateErr = e;
-      return false;
     }
   }
   async function loadGamePage(id) {
@@ -1062,6 +1058,7 @@
       + '<div class="panel"><details class="adv"><summary>Advanced</summary>'
       + num('cheat_min_stable_ms', 'Wait after game start (ms)', 'Cheats are held back this long after a game launches.', 0, 60000)
       + num('cheat_apply_cooldown_ms', 'Gap between cheats (ms)', 'Minimum time between two cheat toggles.', 0, 10000)
+      + sw('cheat_auto_safeguards', 'Cheat safeguards', 'On: turning a cheat on switches off the cheats it conflicts with and switches on the Mastercode it needs. Off: nothing is changed for you.')
       + sw('cheat_master_code_fixup', 'Master-code fixup', 'Resolve master-code dependent cheats automatically.')
       + '<div class="set-row"><div class="set-txt"><b>Log level</b><span>How much detail is written to the log.</span></div><div class="set-ctl"><select class="select" data-change="cfgLog" aria-label="Log level">'
       + ['debug', 'info', 'warn', 'error'].map(function (l) { return '<option' + (c.log_level === l ? ' selected' : '') + '>' + l + '</option>'; }).join('') + '</select></div></div>'
@@ -1166,19 +1163,16 @@
       if (busy !== S.launchBusy) { S.launchBusy = busy; if (route().page === 'games') paintGrid(); }
     } catch (e) { return false; }
   }
+  // The next tick is scheduled only after fn settles, so slow requests never pile up; a throw or `false` backs off.
   function poller(fn, ms, when) {
     var fails = 0;
     (async function tick() {
       var delay = isPS5 ? ms * 2 : ms;
       if (document.hidden) delay = ms * 3;
       else if (!when || when()) {
-        try {
-          // Schedule only after settlement; a timeout must not queue another tick.
-          var result = await fn();
-          fails = result === false ? fails + 1 : 0;
-        } catch (e) { fails++; }
+        try { fails = (await fn()) === false ? fails + 1 : 0; } catch (e) { fails++; }
       }
-      setTimeout(tick, fails ? Math.max(delay, Math.min(ms * Math.pow(2, Math.min(fails, 4)), 60000)) : delay);
+      setTimeout(tick, fails ? Math.min(ms * (1 << Math.min(fails, 4)), 60000) : delay);
     })();
   }
 
@@ -1308,7 +1302,7 @@
   }
 
   /* --------------------------------------------------------------- support */
-  var SUPPORTERS = ['primo', 'lal3x', 'jawad', 'anonymous', 'Maffioh', 'X-F1REBALL-X', 'Br0ken4life', 'Nimrod', 'PCYGOR', 'Lucas Clinio Maraia', 'Vinas', 'Someone', 'Bruno Sanglard', 'AirKingBR', 'Marcus', 'Jeffs', 'cavalcanti27'];
+  var SUPPORTERS = ['primo', 'lal3x', 'jawad', 'anonymous', 'Maffioh', 'X-F1REBALL-X', 'Br0ken4life', 'Nimrod', 'PCYGOR', 'Lucas Clinio Maraia', 'Vinas', 'Someone', 'Bruno Sanglard', 'AirKingBR', 'Marcus', 'Jeffs', 'cavalcanti27', 'I gave a tip!', 'johnfugate', 'Loxias', 'Shambhala222', 'Zahir Tarafder', 'Wender', 'Heymimd', 'Android_Loads', 'LOCATELLI', 'Tiago G DE LIRA', 'Giih77777', 'mvlira', 'PauloSantos', 'Waleed', 'Doubleq', 'gas17', 'PS5FOREVA'];
   var NEON = ['#00ff88', '#cc44ff', '#ff9900', '#ffe600', '#00aaff', '#ff4040'];
   var CRYPTO = [
     { label: 'BTC', addr: 'bc1ppfcad9ytyzmmzq3nfatfcag7q38rqcpsvxfqusq0uzv4gh82pa4syeknlk' },
@@ -1608,9 +1602,8 @@
     poller(refreshLogs, 6000, function () { return route().page === 'system'; });
     poller(async function () {
       var g = S.g; if (!g || route().page !== 'game' || g.tab !== 'cheats' || !g.loaded || Object.keys(g.applying).length) return;
-      var result = await loadCheatState(g.id);
+      await loadCheatState(g.id);
       if (S.g === g && route().page === 'game' && g.tab === 'cheats') paintMods();
-      return result;
     }, 6000);
   })();
 })();

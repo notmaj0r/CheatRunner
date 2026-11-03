@@ -415,5 +415,7 @@
 "Credits": "제작자",
 "Download community patch sets. Patches are saved to /data/cheatrunner/patches.": "Download community patch sets. Patches are saved to /data/cheatrunner/patches.",
 "Open repository": "Open repository",
-"Patch source": "Patch source"
+"Patch source": "Patch source",
+"Cheat safeguards": "Cheat safeguards",
+"On: turning a cheat on switches off the cheats it conflicts with and switches on the Mastercode it needs. Off: nothing is changed for you.": "On: turning a cheat on switches off the cheats it conflicts with and switches on the Mastercode it needs. Off: nothing is changed for you."
 }

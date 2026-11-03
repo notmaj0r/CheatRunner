@@ -25,7 +25,7 @@ handle_api_config(int fd) {
            "\"games_cache_ttl_ms\":%d,\"appdb_debug_names\":%d,\"log_level\":\"%s\","
            "\"theme\":\"%s\","
            "\"cheat_min_stable_ms\":%d,\"cheat_apply_cooldown_ms\":%d,"
-           "\"cheat_master_code_fixup\":%d,"
+           "\"cheat_master_code_fixup\":%d,\"cheat_auto_safeguards\":%d,"
            "\"cheat_inter_mod_delay_ms\":%d,"
            "\"cheat_mark_crash_suspect\":%d,"
            "\"cheat_apply_one_at_a_time\":%d,"
@@ -44,7 +44,7 @@ handle_api_config(int fd) {
            g_cfg.games_cache_ttl_ms, g_cfg.appdb_debug_names, g_cfg.log_level,
            g_cfg.theme,
            g_cfg.cheat_min_stable_ms, g_cfg.cheat_apply_cooldown_ms,
-           g_cfg.cheat_master_code_fixup,
+           g_cfg.cheat_master_code_fixup, g_cfg.cheat_auto_safeguards,
            g_cfg.cheat_inter_mod_delay_ms,
            g_cfg.cheat_mark_crash_suspect,
            g_cfg.cheat_apply_one_at_a_time,
@@ -149,6 +149,8 @@ handle_api_config_set(int fd, const char *query) {
     g_cfg.cheat_apply_cooldown_ms = (v >= 0 && v <= 10000) ? v : 500;
   } else if (!strcmp(key, "cheat_master_code_fixup")) {
     g_cfg.cheat_master_code_fixup = atoi(value) ? 1 : 0;
+  } else if (!strcmp(key, "cheat_auto_safeguards")) {
+    g_cfg.cheat_auto_safeguards = atoi(value) ? 1 : 0;
   } else if (!strcmp(key, "cheat_inter_mod_delay_ms")) {
     int v = atoi(value);
     g_cfg.cheat_inter_mod_delay_ms = (v >= 0 && v <= 10000) ? v : 0;

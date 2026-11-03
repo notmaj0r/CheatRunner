@@ -174,6 +174,10 @@ Example files:
 /data/cheatrunner/cheats/json/CUSA00000.json
 ```
 
+### Safeguards
+
+By default, turning a cheat on switches off the cheats it overlaps with and switches on the Mastercode it depends on. **Settings → Advanced → Cheat safeguards** turns that off, so you decide what runs together. Overlapping cheats can then leave wrong bytes behind when switched off, and a cheat that needs its Mastercode can crash the game without it.
+
 ### Version-aware selection
 
 CheatRunner matches cheat files by title ID and game version:
@@ -201,6 +205,7 @@ Notes:
 
 - Sub-folders (such as a downloaded repo) are scanned too, and `.xml` is matched in any letter case.
 - Files need a `<TitleID>` block; ones without it are skipped and logged as `index_skip no_title_id`.
+- `AppElf` targets a loaded module; with `ImageBase`, addresses are resolved relative to that module. If it is not loaded, the patch reports `module_not_loaded`.
 - New files are picked up automatically, or press Refresh in the dashboard.
 - **CheatRunner Patches** are saved in `xml/cheatrunner` and `xml_prospero/cheatrunner`. If a game has patches there, only those are used and PS-Game-Patch files for the same game are ignored; games they don't cover keep using PS-Game-Patch.
 

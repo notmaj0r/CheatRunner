@@ -20,6 +20,19 @@ typedef struct running_game_state {
   uint64_t started_at;
 } running_game_state_t;
 
+#define VME_TYPE_VNODE 2
+#define VME_PROT_EXEC  4
+#define VMMAP_MAX      1024
+
+typedef struct {
+  uint64_t start, end;
+  int type, prot;
+  char path[128];
+} vm_region_t;
+
+/* Reads the process VM map in address order; returns the entry count (0 on failure). */
+int vmmap_read(pid_t pid, vm_region_t *out, int max);
+
 pid_t find_pid_for_app_id(uint32_t app_id);
 pid_t find_pid_by_name(const char *name);
 int get_running_game_ex(pid_t *out_pid, char *out_title, size_t title_size, intptr_t *out_base, int *out_app_id);

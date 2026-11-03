@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 
@@ -13,6 +15,8 @@
 #include "cr_config.h"
 #include "cr_mdbg.h"
 #include "cr_memory.h"
+#include "cr_game_monitor.h"
+#include "third_party/cJSON.h"
 #include "ps5sdk_compat.h"
 
 static int
@@ -173,4 +177,56 @@ write_process_memory_forced(pid_t pid, intptr_t addr, const uint8_t *data, size_
              (long)addr, len);
   }
   return (wrc < 0) ? -1 : 0;
+}
+
+int
+cheat_entry_section(const struct cJSON *entry) {
+  const cJSON *sec = cJSON_GetObjectItemCaseSensitive((cJSON *)entry, "section");
+  if (cJSON_IsNumber(sec)) {
+    return sec->valuedouble >= 1 && sec->valuedouble <= 4096 ? (int)sec->valuedouble : 0;
+  }
+  /* Many cheat files write the index as text ("14"). */
+  if (cJSON_IsString(sec) && sec->valuestring) {
+    char *end = NULL;
+    long v = strtol(sec->valuestring, &end, 10);
+    while (end && (*end == ' ' || *end == '\t')) end++;
+    if (end && end != sec->valuestring && *end == '\0' && v >= 1 && v <= 4096) return (int)v;
+  }
+  return 0;
+}
+
+intptr_t
+vmmap_region_base(pid_t pid, int index, uint64_t off) {
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  static vm_region_t *regions;
+  static int count;
+  static pid_t c_pid = -1;
+  static time_t c_at;
+  intptr_t base = 0;
+  pthread_mutex_lock(&lock);
+  time_t now = time(NULL);
+  if (!regions) regions = malloc(VMMAP_MAX * sizeof(*regions));
+  /* A state poll asks once per entry; one read per couple of seconds is enough. */
+  if (regions && (c_pid != pid || now - c_at >= 2)) {
+    count = vmmap_read(pid, regions, VMMAP_MAX);
+    c_pid = pid;
+    c_at = now;
+  }
+  if (regions && index >= 0 && index < count && off < regions[index].end - regions[index].start) {
+    base = (intptr_t)regions[index].start;
+  }
+  pthread_mutex_unlock(&lock);
+  return base;
+}
+
+intptr_t
+cheat_entry_base(pid_t pid, const struct cJSON *entry, intptr_t mod_base, uint64_t off) {
+  int sec = cheat_entry_section(entry);
+  if (sec > 0) {
+    intptr_t b = kernel_dynlib_mapbase_addr(pid, (uint32_t)sec);
+    if (b > 0) return b;
+    b = vmmap_region_base(pid, sec, off);
+    if (b > 0) return b;
+  }
+  return mod_base;
 }

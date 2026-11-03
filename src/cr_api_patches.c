@@ -262,6 +262,7 @@ handle_patches_list(int fd, const char *query) {
         cJSON_AddNumberToObject(ej, "index",               i);
         cJSON_AddStringToObject(ej, "entryId",             e->entry_id);
         cJSON_AddStringToObject(ej, "name",                e->name);
+        cJSON_AddStringToObject(ej, "appElf",              e->app_elf);
         cJSON_AddStringToObject(ej, "author",              e->author);
         cJSON_AddStringToObject(ej, "note",                e->note);
         cJSON_AddStringToObject(ej, "titleId",             title_id);

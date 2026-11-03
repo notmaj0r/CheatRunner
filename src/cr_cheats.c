@@ -1020,6 +1020,7 @@ apply_cheat_json_impl(const char *title_id, int mod_index, int turn_on, char *er
   int cooldown_ms       = g_cfg.cheat_apply_cooldown_ms;
   int min_stable_ms     = g_cfg.cheat_min_stable_ms;
   int mc_fixup          = g_cfg.cheat_master_code_fixup;
+  int safeguards        = g_cfg.cheat_auto_safeguards;
   int inter_mod_delay_ms = g_cfg.cheat_inter_mod_delay_ms;
   pthread_mutex_unlock(&g_cfg_lock);
   if (!engine_enabled) {
@@ -1160,7 +1161,7 @@ apply_cheat_json_impl(const char *title_id, int mod_index, int turn_on, char *er
   }
 
   /* Auto-disable conflicts before taking the apply lock; the recursive apply calls take it themselves. */
-  if (effective_on) {
+  if (effective_on && safeguards) {
     char *conflict_json = cJSON_PrintUnformatted(root);
     if (conflict_json) {
       cheat_conflict_map_t cmap;
@@ -1188,7 +1189,7 @@ apply_cheat_json_impl(const char *title_id, int mod_index, int turn_on, char *er
   }
 
   /* Auto-enable the file mastercode first, also before the lock for the same reason. */
-  if (effective_on) {
+  if (effective_on && safeguards) {
     cJSON *mc_m = find_master_code_mod_for(mods, mod_index);
     if (mc_m && mc_m != mod) {
       int mc_idx = -1;
@@ -1348,20 +1349,20 @@ apply_cheat_json_impl(const char *title_id, int mod_index, int turn_on, char *er
       cJSON *off_j2     = cJSON_GetObjectItem(m, "off");
       cJSON *expected_j = cJSON_GetObjectItem(m, "expected");
       cJSON *abs_j      = cJSON_GetObjectItem(m, "absolute");
-      cJSON *sec_j      = cJSON_GetObjectItem(m, "section");
-      /* section > 0 resolves the module by handle index; falls back to the eboot base with a warning. */
+      /* section > 0 is a dynlib handle, else a VM map region index; falls back to the eboot base with a warning. */
       intptr_t entry_base = mod_base;
-      if (cJSON_IsNumber(sec_j) && sec_j->valuedouble > 0) {
-        int sec_num = (int)sec_j->valuedouble;
-        intptr_t sec_resolved = kernel_dynlib_mapbase_addr(pid, (uint32_t)sec_num);
-        if (sec_resolved > 0) {
-          entry_base = sec_resolved;
+      int sec_num = cheat_entry_section(m);
+      if (sec_num > 0) {
+        uint64_t sec_off = 0;
+        if (cJSON_IsString(off_j)) parse_offset_hex_checked(off_j->valuestring, &sec_off);
+        entry_base = cheat_entry_base(pid, m, mod_base, sec_off);
+        if (entry_base != mod_base) {
           cr_log("info", "cheats.mem",
                  "entry[%d] section=%d resolved base=0x%lx title=%s mod=%d",
                  pre_n, sec_num, (long)entry_base, title_id, mod_index);
         } else {
           cr_log("warn", "cheats.mem",
-                 "entry[%d] section=%d unresolved (dynlib handle not found) — using eboot base title=%s mod=%d",
+                 "entry[%d] section=%d unresolved (no dynlib handle or map region) — using eboot base title=%s mod=%d",
                  pre_n, sec_num, title_id, mod_index);
         }
       }

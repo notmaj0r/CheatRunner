@@ -70,8 +70,8 @@ find_module_handle(const char *module_name, int verbose) {
     return 0;
   }
 
-  /* Static buffer instead of malloc/free - a heap-decommit assertion in SceShellUI's
-   * own allocator (seen on 4.03) fired around that pair. Old shells have 250+ modules. */
+  /* Static buffer instead of malloc/free: SceShellUI's allocator can assert around that pair.
+   * Old shells have 250+ modules. */
   static uintptr_t handles[MODULE_HANDLE_MAX];
   if (num_handles > MODULE_HANDLE_MAX) {
     cr_plog("hotkey_hook: %zu modules, more than the %d the list can hold\n", num_handles, MODULE_HANDLE_MAX);
